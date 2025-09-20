@@ -1,3 +1,4 @@
+import pickle
 import uproot as ur
 import numpy as np
 import pandas as pd
@@ -224,3 +225,65 @@ class GradientBoostHybrid:
         importances=pd.Series(self.model.feature_importances_,index=self.features).sort_values(ascending=False)
         return importances
 
+    def save_xgb_model(self, path_prefix='npyfiles/xgb_model'):
+        '''
+        Save xgb model and encoder:
+        - {path_prefix}.json: XGBoost model
+        - {path_prefix}_encoder.pkl: LabelEncoder
+        '''
+
+        if self.model is None:
+            raise RuntimeError('No model tained yet. Must run xgb_train() first...')
+
+        model_path = f"{path_prefix}.json"
+        self.model.save_model(model_path)
+
+        #Save label encoder
+        encoder_path = f"{path_prefix}_encoder.pkl"
+        with open(encoder_path, "wb") as f:
+            pickle.dump(self.label_encoder, f)
+
+        print(f"Saved model to {model_path}")
+        print(f"Saved label encoder to {encoder_path}")
+
+    def predict_from_hist(self, hist2d):
+        '''
+        Predict class lebels given a ROOT TH2 hist
+        '''
+        if self.model is None:
+            raise RuntimeError("No trained model found. Run xgb_train() first or load saved model...")
+
+        #Extract bin centers and counts
+        x_bins = hist2d.GetXaxis().GetNbins()
+        y_bins = hist2d.GetYaxis().GetNbins()
+        data = []
+
+        for ix in range(1,x_bins+1):
+            for iy in range(1,y_bins+1):
+                count = hist2d.GetBinContent(ix, iy)
+                if count <= 0:
+                    continue #skip empty bins
+                x_center = hist2d.GetXaxis().GetBinContent(ix)
+                y_center = hist2d.GetYaxis().GetBinContent(iy)
+                data.append((x_center, y_center, count))
+
+        if not data:
+            print("*****Warning: Histogram is empty******")
+            return None
+
+        #convert to DataFrame
+        df = pd.DataFrame(data, columns=['posX','posY','weight'])
+
+        feature_cols = [f for f in ['posX','posY'] if f in self.features]
+        X = df[feature_cols]
+
+        dmatrix = xgb.DMatrix(X, weight=df['weight'].to_numpy())
+
+        #Predict
+        preds = self.model.predict(dmatrix)
+        laebls = self.label_encoder.inverse_transform(preds.astype(int))
+
+        #Attach predictions
+        df['prediction'] = labels
+
+        return df
