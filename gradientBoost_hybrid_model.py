@@ -121,9 +121,26 @@ class GradientBoostHybrid:
             df_tree = df_tree.iloc[:self.max_events]
         return df_tree
 
-    def xgb_train(self,test_size=0.2, random_state=42):
+    def xgb_train(
+            self,max_depth=6,loss='mlogloss',eta=0.1,subsample=0.8,tree_method='hist',
+            num_boost_round=200,test_size=0.2, 
+            random_state=42
+        ):
         '''
         Train XGBoost Classifier
+        Hyperparameters:
+        loss:
+         - default: mgloss
+        max_depth:
+         - default: 6
+        eta:
+         - default: 0.1
+        subsample:
+         - default: 0.8
+        tree_method:
+         - default: hist
+        num_boost_round:
+         - default: 200
         '''
         df = self._load_data()
         X = df[self.features + ['bin_index', 'radius']]
@@ -145,20 +162,20 @@ class GradientBoostHybrid:
         #XGBoost params:
         xgb_params={
             'objective': 'multi:softmax',
-            'eval_metric': 'mlogloss',
+            'eval_metric': loss,
             'num_class': num_classes,
             #'num_class': len(np.unique(y)),
-            'max_depth': 6,
-            'eta': 0.1,
-            'subsample': 0.8,
-            'tree_method': 'hist'
+            'max_depth': max_depth,
+            'eta': eta,
+            'subsample': subsample,
+            'tree_method': tree_method
         }
 
         print("Training XGBoost model...")
         self.model = xgb.train(
             xgb_params, 
             dtrain, 
-            num_boost_round=200,
+            num_boost_round=num_boost_round,
             evals=[(dtrain,'train'),(dtest,'test')],
             verbose_eval=True
         )
@@ -169,13 +186,20 @@ class GradientBoostHybrid:
         print(f"Test Accuracy: {acc: 4f}")
 
         return self.model
-    def gbhm_train(self,test_size=0.3,random_state=42):
+    def gbhm_train(
+            self,n_estimators=100,learn_rate=0.1,max_depth=3,
+            test_size=0.3,random_state=42
+        ):
         """
         Trains the Gradient Boosting model.
 
         Args:
             test_size (float): The proportion of the dataset to include in the test split.
             random_state (int): Controls the shuffling applied to the data.
+            * Set Hyperparameters
+             - n_estimators
+             - learn_rate
+             - max_depth
         """
         #Load and preprocess data
         data=self._load_data()
@@ -188,7 +212,12 @@ class GradientBoostHybrid:
 
         #Initialize and train the Gradient Boosting model
         print("Training Gradient Boosting model...")
-        self.model=GradientBoostingClassifier(n_estimators=100,learning_rate=0.1,max_depth=3,random_state=random_state)
+        self.model=GradientBoostingClassifier(
+            n_estimators=n_estimators,
+            learning_rate=learn_rate,
+            max_depth=max_depth,
+            random_state=random_state
+        )
         self.model.fit(X_train,y_train)
 
         #Evaluate the model
