@@ -1,0 +1,244 @@
+'''
+This is utility scheduler for DDPM
+Class also handles loading and rebinning TH2
+'''
+import os
+import math
+import time
+import numpy as np
+import uproot as ur
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+
+from sklearn.preprocessing import LabelEncoder
+from typing import List, Tuple, Union, Optional
+
+
+class DDPM_utils:
+    #####################
+    # Schedule Utilities
+    #####################
+    def make_beta_schedule(timesteps: int, beta_start=1e-4, beta_end=2e-2):
+        return np.linspace(beta_start, beta_end, timesteps, dtype=np.float32)
+
+    def extract(a, t, x_shapes):
+        '''
+        Extract coeff. for batch of timesteps t (shapte [B]) from arry (shape [T])
+        and reshape to [B,1,1,1] for broadcasting to images
+        '''
+        batch_size = tf.shape(t)[0]
+        out = tf.gather(a, t)
+        #reshape to (B,1,1,1)
+        return tf.reshape(out, (batch_size, 1, 1, 1))
+
+    #Time embedding (sinusoidal + dense)
+    @staticmethod
+    def sinusoidal_embedding(timesteps, dim):
+        #timesteps: (...,)int32
+        timesteps = tf.cast(timesteps, tf.float32)
+        half = dim//2
+        freqs = tf.exp(-np.log(10000)*(tf.range(0,half,dtype=tf.float32)/float(half)))
+        args = tf.cast(tf.expand_dims(timesteps, -1),tf.float32)*tf.reshape(freqs,(1,-1))
+        emb = tf.concat([tf.sin(args),tf.cos(args)],axis=-1)
+        if dim % 2 ==1:
+            emb =tf.pad(emb, [[0,0],[0,1]])
+        #shape (B,dim)
+        return emb
+
+    '''
+    Small UNet-like model (conditioned on timestep, class and aux scalar)
+    '''
+    def make_unet2d(
+        input_shape=(64,64,1),
+        base_channels=64,
+        time_embed_dim=128,
+        class_embed_dim=32,
+        aux_embed_dim=32
+    ):
+        #Inputs
+        img_in = keras.Input(shape=input_shape, name='image')
+        t_in = keras.Input(shape=(),dtype=tf.int32, name='timestep')
+        cls_in = keras.Input(shape=(),dtype=tf.int32, name='class_id')
+        aux_in = keras.Input(shape=(1,), dtype=tf.float32, name='aux_scaler')
+
+        #Produce dense time embedding
+        '''
+        t_emb = layers.Lambda(lambda : sinusoidal_embedding(x, time_embed_dim))(t_in)
+        t_emb = layers.Dense(time_embed_dim, activation='swish')(t_emb)
+        t_emb = layers.Dense(time_embed_dim, activation='swish')(t_emb)
+
+        #Class embedding
+        n_classes = 1_000
+        cls_emb_layer = layers.Embedding(input_dim=64, output_dim=class_embed_dim)
+
+        #aus scalar embedding
+        aux_emb = layers.Dense(aux_embed_dim, activation='swish')(aux_in)
+
+        #We'll build a small encoder-decoder with FiLM conditioning (scale+shift) using time+class+aux embeddings
+        #Encoder
+        x = img_in
+        #conv block 1
+        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
+        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
+        skip1 = x
+        #Downsample
+        x = layers.AveragePooling2D()(x)
+        #conv block 2
+        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
+        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
+        skip2 = x
+        #Downsample
+        x = layers.AveragePooling2D()(x)
+        #Bottleneck
+        x = layers.Conv2D(base_channels*4, 3, padding='same', activation='relu')(x)
+        x = layers.Conv2D(base_channels*4, 3, padding='same', activation='relu')(x)
+
+        #Combine embeddings: concatenate t_emb, aux_emb, class embedding
+        #Create conditioning vector via dense
+        # shape (B, time+aux+class)
+        cond = layers.Concatenate()([t_emb, aux_emb])
+        cond = layers.Dense(base_channels*4, activation='swish')(cond)
+        cond = layers.Dense(base_channels*4, activation='swish')(cond)
+        #Broadcast and add
+        cond_b = layers.Reshape((1,1,base_channels*4))(cond)
+        x = layers.Add()([x,cond_b])
+
+        #Decoder
+        x = layers.UpSampling2D()(x)
+        x = layers.Concatenate()([x, skip2])
+        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
+        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
+
+        x = layers.UpSampling2D()(x)
+        x = layers.Concatenate()([x, skip1])
+        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
+        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
+
+        #predict noise, no activation
+        out = layers.Conv2D(1,1,padding='same')(x)
+        '''
+        #specify output shape explicitly
+        t_emb = layers.Lambda(
+            lambda x: DDPM_utils.sinusoidal_embedding(x, time_embed_dim),
+            output_shape=(time_embed_dim,)
+        )(t_in)
+        t_emb = layers.Dense(time_embed_dim, activation="swish")(t_emb)
+        t_emb = layers.Dense(time_embed_dim, activation="swish")(t_emb)
+        aux_emb = layers.Dense(32, activation="swish")(aux_in)
+
+        x = layers.Conv2D(base_channels, 3, padding="same", activation="relu")(img_in)
+        x = layers.MaxPooling2D()(x)
+        x = layers.Conv2D(base_channels * 2, 3, padding="same", activation="relu")(x)
+        x = layers.GlobalAveragePooling2D()(x)
+
+        cls_emb = layers.Embedding(input_dim=64, output_dim=class_embed_dim)(cls_in)
+        cls_emb = layers.Flatten()(cls_emb)
+        cond = layers.Concatenate()([t_emb, aux_emb, cls_emb])
+        cond = layers.Dense(base_channels * 2, activation="relu")(cond)
+
+        x = layers.Concatenate()([x, cond])
+        x = layers.Dense(np.prod(input_shape), activation=None)(x)
+        out = layers.Reshape(input_shape)(x)
+
+        model = keras.Model([img_in, t_in, cls_in, aux_in],out, name='unet2d')
+        return model
+
+    '''
+    TH2 laoding and rebinning to his_shape
+    '''
+    def  _load_th2_images(
+        inputfiles,
+        histogram_name = 'hist2D',
+        tree_name = 'Events',
+        branch_name = ('posX','posY'),
+        aux_scalar_branch = 'pT',
+        target = 'pdgID',
+        hist_shape = (64,64),
+        x_edges = None,
+        y_edges = None
+    ):
+        """
+        Return arrays:
+            imgs: shape (N, H, W)  -- rebinned & normalized histograms
+            labels: shape (N,)      -- integer encoded pdgIDs
+            aux: shape (N,1)        -- scalar conditioning (e.g., pT or energy) (float)
+        Flow:
+            - For each input file, try to read histogram self.histogram_name (TH2).
+            - Also read per-event auxiliary scalar + pdgID from TTree (first event-level mapping).
+        NOTE: This function expects that histograms in files correspond to events/classes in some meaningful way.
+        If your setup is different (e.g., one TH2 per file summarizing many events), adapt accordingly.
+        """
+        imgs = []
+        labels = []
+        auxs = []
+
+        # We'll attempt two ways:
+        # 1) If a TH2 named self.histogram_name exists, take its 2D bin content as a single image for that file.
+        # 2) Otherwise, we fall back to producing histogram images from the tree per-event (expensive).
+        for fname in inputfiles:
+            with ur.open(fname) as f:
+                if histogram_name in f:
+                    hist = f[histogram_name]
+                    # uproot .to_numpy() returns (values, xedges, yedges)
+                    values, xedges, yedges = hist.to_numpy()
+                    img = np.array(values, dtype=np.float32)
+                    # rebin/rescale to target hist_shape
+                    img = DDPM_utils._rebin_image(img, hist_shape)
+                    imgs.append(img)
+
+                    # For labels/aux, try reading small sample from TTree: take the mode/first pdgID and mean aux
+                    try:
+                        tree = f[tree_name]
+                        # read small subset
+                        arrs = tree.arrays([aux_scalar_branch, target], library="np", entry_stop=100)
+                        aux_arr = arrs[aux_scalar_branch]
+                        pdg_arr = arrs[target]
+                        # fallbacks
+                        aux_val = float(np.mean(aux_arr)) if len(aux_arr) > 0 else 0.0
+                        pdg_val = int(pdg_arr[0]) if len(pdg_arr) > 0 else 0
+                    except Exception:
+                        aux_val = 0.0
+                        pdg_val = 0
+                    auxs.append([aux_val])
+                    labels.append(pdg_val)
+                else:
+                    # Fall-back: build histogram from events in TTree (slower)
+                    tree = f[self.tree_name]
+                    arrays = tree.arrays([branch_name[0],branch_name[1],aux_scalar_branch,target],library="np")
+                    x = arrays[branch_name[0]]
+                    y = arrays[branch_name[1]]
+                    aux_arr = arrays[aux_scalar_branch]
+                    pdg_arr = arrays[target]
+                    # make 2D histogram using the global x_edges, y_edges
+                    H, _, _ = np.histogram2d(x, y, bins=[x_edges, y_edges])
+                    img = self._rebin_image(np.array(H, dtype=np.float32), hist_shape)
+                    imgs.append(img)
+                    auxs.append([float(np.mean(aux_arr)) if len(aux_arr) else 0.0])
+                    labels.append(int(pdg_arr[0]) if len(pdg_arr) else 0)
+
+        if not imgs:
+            raise RuntimeError("No TH2 images found across input files.")
+
+        imgs = np.stack(imgs, axis=0)  # (N,H,W)
+        labels = np.array(labels, dtype=np.int32)
+        auxs = np.array(auxs, dtype=np.float32)
+
+        # Normalize images to [0,1] by per-image max to stabilize training
+        imgs = imgs / (imgs.max(axis=(1, 2), keepdims=True) + 1e-6)
+
+        # Encode labels
+        le = LabelEncoder()
+        labels_enc = le.fit_transform(labels)
+
+        return imgs, labels_enc, auxs, le
+
+    def _rebin_image(img: np.ndarray, target_shape: Tuple[int, int]) -> np.ndarray:
+        """
+        Resize 2D array `img` to `target_shape` using bilinear interpolation (TensorFlow).
+        """
+        img_tf = tf.expand_dims(tf.expand_dims(tf.convert_to_tensor(img, dtype=tf.float32), 0), -1)  # (1,H,W,1)
+        resized = tf.image.resize(img_tf, target_shape, method="bilinear", antialias=True)
+        resized = tf.squeeze(resized, axis=0)  # (H,W,1)
+        resized = tf.squeeze(resized, axis=-1).numpy()  # (H,W)
+        return resized.astype(np.float32)
