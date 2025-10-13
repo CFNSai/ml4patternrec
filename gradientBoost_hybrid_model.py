@@ -696,7 +696,7 @@ class GradientBoostHybrid:
     ###############################################################
     #####      Save Both XGB & GBHM and Load  models       ########
     ###############################################################
-    def save(self, path_prefix="saved_models/hybrid_model"):
+    def save_models(self, path_prefix="saved_models/hybrid_model"):
         """Save model and encoder to disk."""
         os.makedirs(os.path.dirname(path_prefix), exist_ok=True)
         if self.model:
@@ -706,7 +706,7 @@ class GradientBoostHybrid:
         joblib.dump(self.label_encoder, f"{path_prefix}_encoder.pkl")
         print(f"Saved model and encoder --> {path_prefix}_*")
 
-    def load(self, path_prefix="saved_models/hybrid_model"):
+    def load_models(self, path_prefix="saved_models/hybrid_model"):
         """Load model and encoder from disk."""
         if os.path.exists(f"{path_prefix}_gbhm.pkl"):
             self.model = joblib.load(f"{path_prefix}_gbhm.pkl")
