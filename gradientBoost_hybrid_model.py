@@ -12,14 +12,23 @@ import pandas as pd
 import xgboost as xgb
 import joblib
 import json
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import HistGradientBoostingClassifier, GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.preprocessing import LabelEncoder
 from typing import List, Tuple, Union, Optional
+
+# Try TF (diffusion). If not available, we gracefully disable DDPM functionality.
+try:
+    import tensorflow as tf
+    from tensorflow import keras
+    from tensorflow.keras import layers
+    TF_AVAILABLE = True
+except Exception:
+    TF_AVAILABLE = False
+    tf = None
+    keras = None
+    layers = None
 
 class GradientBoostHybrid:
     """
@@ -84,7 +93,7 @@ class GradientBoostHybrid:
         self.alphas_cumprod = np.cumprod(self.alphas,axis=0).astype(np.float32)
         self.alphas_cumprod_prev = np.append(1.0,self.alphas_cumprod[:-1]).astype(np.float32)
         self.shape = hist_shape #target image size for diffusion
-        self.diffusion_model = DDPM_utils.make_unet2d(input_shape=(64,64,1))
+        self.diffusion_model = None
 
         #Model dir
         self.model_dir = model_dir
@@ -318,7 +327,12 @@ class GradientBoostHybrid:
         '''
         Train DDPM (predict noise) on the set of images + conditioning label + aux scaler
         '''
+        if not TF_AVAILABLE:
+            raise RuntimeError("TensorFlow not available for DDPM.")
         device = device or ("/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0")
+        if self.diffusion_model is None:
+            # if no model, build base model
+            self.diffusion_model = DDPM_utils.make_unet2d(input_shape=(*self.hist_shape, 1))
         #imgs (N,H,W)
         imgs, labels_enc, auxs, le = DDPM_utils._load_th2_images(
             inputfiles=self._inputfiles, histogram_name=self.histogram_name,
@@ -456,13 +470,13 @@ class GradientBoostHybrid:
         return out
 
     def save_ddpm(self, path='saved_models'):
-        if self.diffusion_model in None:
+        if self.diffusion_model is None:
             raise RuntimeError('No diffusion model to save...')
-        os.makedirs(path, exists_ok=True)
+        os.makedirs(path, exist_ok=True)
         #Save weights + important arrays
-        self.diffusion_model.save_weights(os.path.join(path, 'ddpm_ckpt_unet_weights.h5'))
-        np.save(os.path.join(path,'betas.npy'),self.betas)
-        np.save(os.path.join(path,'alphas_cumprod.npy'),self.alphas_cumprod)
+        self.diffusion_model.save_weights(os.path.join(path, 'ddpm.weights.h5'))
+        np.save(os.path.join(path,'ddpm_betas.npy'),self.betas)
+        np.save(os.path.join(path,'ddpm_alphas_cumprod.npy'),self.alphas_cumprod)
         #Save label encoder
         if self.label_encoder is not None:
             joblib.dump(self.label_encoder,os.path.join(path,'label_encoder.pkl'))
@@ -470,13 +484,13 @@ class GradientBoostHybrid:
 
     def load_ddpm(self, path='saved_models'):
         #load arrays
-        self.betas = np.load(os.path.join(path,'ddpm_ckpt_betas.npy'))
-        self.alphas_cumprod = np.load(os.path.join(path,'ddpm_ckpt_alphas_cumprod.np'))
+        self.betas = np.load(os.path.join(path,'ddpm_betas.npy'))
+        self.alphas_cumprod = np.load(os.path.join(path,'ddpm_alphas_cumprod.np'))
         #rebuild model with hist_shape and load weights
         self.build_diffusion_model(n_classes=len(self.label_encoder.classes_) if self.label_encoder is not None else None)
-        self.diffusion_model.load_weights(os.path.join(path,'unet_weights.h5'))
+        self.diffusion_model.load_weights(os.path.join(path,'ddpm.weights.h5'))
         #load label encoder if present
-        le_path = os.path.join(path,'ddpm_ckpt_label_encoder.pkl')
+        le_path = os.path.join(path,'label_encoder.pkl')
         if os.path.exists(le_path):
             self.laebl_encoder = joblib.load(le_path)
         self.diffusion_compiled = True
@@ -682,6 +696,67 @@ class GradientBoostHybrid:
         test_acc = accuracy_score(y_test, self.gbhm_model.predict(X_test))
         print(f"New Test Accuracy: {test_acc:.4f}")
 
+    ###############################################################
+    ## ddpm finetune
+    ###############################################################
+    def ddpm_finetune(self, new_inputfiles: Union[str, List[str]], epochs: int = 3,
+                      batch_size: int = 8, lr: float = 2e-4):
+        if not TF_AVAILABLE:
+            raise RuntimeError("TensorFlow not available for DDPM.")
+
+        if self.diffusion_model is None:
+            # if no model, build base model
+            self.diffusion_model = DDPM_utils.make_unet2d(input_shape=(*self.hist_shape, 1))
+        # temporarily swap files, load images, then restore
+        old_files = self._inputfiles
+        self._inputfiles = new_inputfiles if isinstance(new_inputfiles, list) else [new_inputfiles]
+        imgs, labels_enc, auxs, le = DDPM_utils._load_th2_images(
+            inputfiles=self._inputfiles, histogram_name=self.histogram_name,
+            tree_name=self.tree_name, aux_scalar_branch = self.aux_scalar_branch,
+            target = self.target,hist_shape=self.hist_shape,
+            x_edges = self.x_edges, y_edges = self.y_edges
+        )
+        self._inputfiles = old_files
+
+        # continue training using same train loop as train_ddpm but smaller epochs
+        opt = keras.optimizers.Adam(learning_rate=lr)
+        T = self.ddpm_timesteps
+        alphas_cum = tf.constant(self.alphas_cumprod, dtype=tf.float32)
+        X = imgs[..., np.newaxis].astype(np.float32)
+        y = labels_enc.astype(np.int32)
+        aux = auxs.astype(np.float32)
+        ds = tf.data.Dataset.from_tensor_slices((X, y, aux)).shuffle(1024).batch(batch_size).prefetch(2)
+
+        @tf.function
+        def train_step(x0, labels, aux_scalar):
+            batch_size_local = tf.shape(x0)[0]
+            t = tf.random.uniform((batch_size_local,), minval=0, maxval=T, dtype=tf.int32)
+            noise = tf.random.normal(tf.shape(x0))
+            coef1 = DDPM_utils.extract(tf.sqrt(alphas_cum), t, tf.shape(x0))
+            coef2 = DDPM_utils.extract(tf.sqrt(1.0 - alphas_cum), t, tf.shape(x0))
+            x_noisy = coef1 * x0 + coef2 * noise
+            with tf.GradientTape() as tape:
+                noise_pred = self.diffusion_model([x_noisy, t, labels, aux_scalar], training=True)
+                loss = tf.reduce_mean(tf.square(noise - noise_pred))
+            grads = tape.gradient(loss, self.diffusion_model.trainable_variables)
+            opt.apply_gradients(zip(grads, self.diffusion_model.trainable_variables))
+            return loss
+
+        print(f"Fine-tuning DDPM on {X.shape[0]} images for {epochs} epochs...")
+        for epoch in range(epochs):
+            avg_loss = 0.0
+            steps = 0
+            t0 = time.time()
+            for bx, by, bau in ds:
+                loss_val = train_step(bx, by, bau)
+                avg_loss += float(loss_val)
+                steps += 1
+            avg_loss /= max(1, steps)
+            print(f"[DDPM fine-tune] epoch {epoch+1}/{epochs} loss={avg_loss:.6f} time={time.time()-t0:.1f}s")
+
+        self.save_ddpm()
+        print("DDPM fine-tune complete.")
+        
     ###############################################################
     # Helpers for fine-tune loading
     ###############################################################

@@ -204,7 +204,7 @@ class DDPM_utils:
                     labels.append(pdg_val)
                 else:
                     # Fall-back: build histogram from events in TTree (slower)
-                    tree = f[self.tree_name]
+                    tree = f[tree_name]
                     arrays = tree.arrays([branch_name[0],branch_name[1],aux_scalar_branch,target],library="np")
                     x = arrays[branch_name[0]]
                     y = arrays[branch_name[1]]
@@ -212,7 +212,7 @@ class DDPM_utils:
                     pdg_arr = arrays[target]
                     # make 2D histogram using the global x_edges, y_edges
                     H, _, _ = np.histogram2d(x, y, bins=[x_edges, y_edges])
-                    img = self._rebin_image(np.array(H, dtype=np.float32), hist_shape)
+                    img = DDPM_utils._rebin_image(np.array(H, dtype=np.float32), hist_shape)
                     imgs.append(img)
                     auxs.append([float(np.mean(aux_arr)) if len(aux_arr) else 0.0])
                     labels.append(int(pdg_arr[0]) if len(pdg_arr) else 0)
