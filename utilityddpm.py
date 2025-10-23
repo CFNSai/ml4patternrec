@@ -178,44 +178,72 @@ class DDPM_utils:
         # 2) Otherwise, we fall back to producing histogram images from the tree per-event (expensive).
         for fname in inputfiles:
             with ur.open(fname) as f:
-                if histogram_name in f:
-                    hist = f[histogram_name]
-                    # uproot .to_numpy() returns (values, xedges, yedges)
-                    values, xedges, yedges = hist.to_numpy()
-                    img = np.array(values, dtype=np.float32)
-                    # rebin/rescale to target hist_shape
-                    img = DDPM_utils._rebin_image(img, hist_shape)
-                    imgs.append(img)
-
-                    # For labels/aux, try reading small sample from TTree: take the mode/first pdgID and mean aux
-                    try:
-                        tree = f[tree_name]
-                        # read small subset
-                        arrs = tree.arrays([aux_scalar_branch, target], library="np", entry_stop=100)
-                        aux_arr = arrs[aux_scalar_branch]
-                        pdg_arr = arrs[target]
-                        # fallbacks
-                        aux_val = float(np.mean(aux_arr)) if len(aux_arr) > 0 else 0.0
-                        pdg_val = int(pdg_arr[0]) if len(pdg_arr) > 0 else 0
-                    except Exception:
-                        aux_val = 0.0
-                        pdg_val = 0
-                    auxs.append([aux_val])
-                    labels.append(pdg_val)
+                #Handle multiple possible histogram names
+                if isinstance(histogram_name, list):
+                    for hname in histogram_name:
+                        if hname in f:
+                            hist = f[hname]
+                            # uproot .to_numpy() returns (values, xedges, yedges)
+                            values, xedges, yedges = hist.to_numpy()
+                            img = np.array(values, dtype=np.float32)
+                            # rebin/rescale to target hist_shape
+                            img = DDPM_utils._rebin_image(img, hist_shape)
+                            imgs.append(img)
+                            
+                            # For labels/aux, try reading small sample from TTree: take the mode/first pdgID and mean aux
+                            try:
+                                tree = f[tree_name]
+                                # read small subset
+                                arrs = tree.arrays([aux_scalar_branch, target], library="np", entry_stop=100)
+                                aux_arr = arrs[aux_scalar_branch]
+                                pdg_arr = arrs[target]
+                                # fallbacks
+                                aux_val = float(np.mean(aux_arr)) if len(aux_arr) > 0 else 0.0
+                                pdg_val = int(pdg_arr[0]) if len(pdg_arr) > 0 else 0
+                            except Exception:
+                                aux_val = 0.0
+                                pdg_val = 0
+                            auxs.append([aux_val])
+                            labels.append(pdg_val)
                 else:
-                    # Fall-back: build histogram from events in TTree (slower)
-                    tree = f[tree_name]
-                    arrays = tree.arrays([branch_name[0],branch_name[1],aux_scalar_branch,target],library="np")
-                    x = arrays[branch_name[0]]
-                    y = arrays[branch_name[1]]
-                    aux_arr = arrays[aux_scalar_branch]
-                    pdg_arr = arrays[target]
-                    # make 2D histogram using the global x_edges, y_edges
-                    H, _, _ = np.histogram2d(x, y, bins=[x_edges, y_edges])
-                    img = DDPM_utils._rebin_image(np.array(H, dtype=np.float32), hist_shape)
-                    imgs.append(img)
-                    auxs.append([float(np.mean(aux_arr)) if len(aux_arr) else 0.0])
-                    labels.append(int(pdg_arr[0]) if len(pdg_arr) else 0)
+                    if histogram_name in f:
+                        hist = f[histogram_name]
+                        # uproot .to_numpy() returns (values, xedges, yedges)
+                        values, xedges, yedges = hist.to_numpy()
+                        img = np.array(values, dtype=np.float32)
+                        # rebin/rescale to target hist_shape
+                        img = DDPM_utils._rebin_image(img, hist_shape)
+                        imgs.append(img)
+                    
+                        # For labels/aux, try reading small sample from TTree: take the mode/first pdgID and mean aux
+                        try:
+                            tree = f[tree_name]
+                            # read small subset
+                            arrs = tree.arrays([aux_scalar_branch, target], library="np", entry_stop=100)
+                            aux_arr = arrs[aux_scalar_branch]
+                            pdg_arr = arrs[target]
+                            # fallbacks
+                            aux_val = float(np.mean(aux_arr)) if len(aux_arr) > 0 else 0.0
+                            pdg_val = int(pdg_arr[0]) if len(pdg_arr) > 0 else 0
+                        except Exception:
+                            aux_val = 0.0
+                            pdg_val = 0
+                        auxs.append([aux_val])
+                        labels.append(pdg_val)
+                    else:
+                        # Fall-back: build histogram from events in TTree (slower)
+                        tree = f[tree_name]
+                        arrays = tree.arrays([branch_name[0],branch_name[1],aux_scalar_branch,target],library="np")
+                        x = arrays[branch_name[0]]
+                        y = arrays[branch_name[1]]
+                        aux_arr = arrays[aux_scalar_branch]
+                        pdg_arr = arrays[target]
+                        # make 2D histogram using the global x_edges, y_edges
+                        H, _, _ = np.histogram2d(x, y, bins=[x_edges, y_edges])
+                        img = DDPM_utils._rebin_image(np.array(H, dtype=np.float32), hist_shape)
+                        imgs.append(img)
+                        auxs.append([float(np.mean(aux_arr)) if len(aux_arr) else 0.0])
+                        labels.append(int(pdg_arr[0]) if len(pdg_arr) else 0)
 
         if not imgs:
             raise RuntimeError("No TH2 images found across input files.")
