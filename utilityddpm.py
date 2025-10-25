@@ -6,6 +6,10 @@ import os
 import math
 import time
 import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib import gridspec, style
+import matplotlib.colors as mcolors
+import seaborn as sns
 import uproot as ur
 import tensorflow as tf
 from tensorflow import keras
@@ -290,15 +294,6 @@ class DDPM_utils:
         plt.title('DDPM Training Loss Curve')
         plt.legend()
         plt.grid(alpha=0.3)
-        plt.show()
-
-    def plot_beta_schedule(betas, save_dir="plots/ddpm_training", show=True):
-        DDPM_utils._ensure_dir(save_dir)
-        plt.plot(betas)
-        plt.xlabel('Timestep')
-        plt.ylabel('Beta')
-        plt.title('Diffusion Beta Schedule')
-        plt.grid(True)
         out_path = os.path.join(save_dir, "ddpm_loss_curve.png")
         plt.savefig(out_path, bbox_inches='tight')
         if show:
@@ -306,6 +301,21 @@ class DDPM_utils:
         else:
             plt.close()
         print(f"[Saved] Plot loss curve → {out_path}")
+
+    def plot_beta_schedule(betas, save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        plt.plot(betas)
+        plt.xlabel('Timestep')
+        plt.ylabel('$\\beta$')
+        plt.title('Diffusion Beta Schedule')
+        plt.grid(True)
+        out_path = os.path.join(save_dir, "ddpm_beta_schedule.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Plot beta scheduler → {out_path}")
 
     @staticmethod
     def plot_noising_process(original_img, noise_fn, num_steps=5, save_dir="plots/ddpm_training", show=True):
@@ -385,3 +395,20 @@ class DDPM_utils:
         else:
             plt.close()
         print(f"[Saved] Latent space → {out_path}")
+
+    @staticmethod
+    def plot_hist2D(X, Y, save_dir="plots", name="pfrich_ringsQA.png", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        plt.figure(figsize=(6,5))
+        scatter = plt.hexbin(X, Y, gridsize=100, cmap='viridis', mincnt=1)
+        plt.title('Hits Profile')
+        plt.colorbar(scatter)
+        plt.xlabel('X [mm]', fontsize=12)
+        plt.ylabel('Y [mm]', fontsize=12)
+        out_path = os.path.join(save_dir, name)
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Hist 2D profile → {out_path}")

@@ -322,7 +322,7 @@ class GradientBoostHybrid:
 
         return coef1*x_start + coef2*noise
 
-    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, device=None, show=True, plotting=True):
+    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, device=None, show=True):
         '''
         Train DDPM (predict noise) on the set of images + conditioning label + aux scaler
         '''
@@ -394,8 +394,10 @@ class GradientBoostHybrid:
             print(f'[DDPM] Epoch {epoch+1}/{epochs} - loss: {avg_loss:.6f} - time: {time.time()-t0:.1f}s')
         self.diffusion_compile = True
         print('DDPM training is complete...')
-        if plotting:
-            DDPM_utils.plot_loss_curve(train_losses=train_loss,show=show)
+        if show:
+            DDPM_utils.plot_loss_curve(train_losses=train_losses,show=show)
+            #Plot beta schedule
+            DDPM_utils.plot_beta_schedule(betas)
 
     def sample_ddpm(
             self,
