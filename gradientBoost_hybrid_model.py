@@ -99,7 +99,6 @@ class GradientBoostHybrid:
         self.model_dir = model_dir
         os.makedirs(self.model_dir, exist_ok=True)
 
-
     def _get_th2_bin_index(self,row: pd.Series) -> int:
         x_var,y_var = self.branch_name
         x_val = row[x_var]
@@ -323,7 +322,7 @@ class GradientBoostHybrid:
 
         return coef1*x_start + coef2*noise
 
-    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, device=None):
+    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, device=None, show=True, plotting=True):
         '''
         Train DDPM (predict noise) on the set of images + conditioning label + aux scaler
         '''
@@ -381,6 +380,7 @@ class GradientBoostHybrid:
             return loss
         
         #Training loop
+        train_losses = []
         for epoch in range(epochs):
             t0 = time.time()
             avg_loss = 0.0
@@ -390,9 +390,12 @@ class GradientBoostHybrid:
                 avg_loss += float(loss_val)
                 steps += 1
             avg_loss /= max(1,steps)
+            train_losses.append(avg_loss)
             print(f'[DDPM] Epoch {epoch+1}/{epochs} - loss: {avg_loss:.6f} - time: {time.time()-t0:.1f}s')
         self.diffusion_compile = True
         print('DDPM training is complete...')
+        if plotting:
+            DDPM_utils.plot_loss_curve(train_losses=train_loss,show=show)
 
     def sample_ddpm(
             self,

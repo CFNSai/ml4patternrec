@@ -22,6 +22,11 @@ class DDPM_utils:
     def make_beta_schedule(timesteps: int, beta_start=1e-4, beta_end=2e-2):
         return np.linspace(beta_start, beta_end, timesteps, dtype=np.float32)
 
+    def _ensure_dir(path):
+        """Utility to ensure a directory exists."""
+        os.makedirs(path, exist_ok=True)
+        return path
+
     def extract(a, t, x_shapes):
         '''
         Extract coeff. for batch of timesteps t (shapte [B]) from arry (shape [T])
@@ -270,3 +275,113 @@ class DDPM_utils:
         resized = tf.squeeze(resized, axis=0)  # (H,W,1)
         resized = tf.squeeze(resized, axis=-1).numpy()  # (H,W)
         return resized.astype(np.float32)
+    
+    #####################################
+    ####   Visualization Utilities   ####
+    #####################################
+    def plot_loss_curve(train_losses, val_losses=None, save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        plt.figure(figsize=(8,5))
+        plt.plot(train_losses, label='Train Loss', lw=2)
+        if val_losses is not None:
+            plt.plot(val_losses, label='Validation Loss', lw=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss (MSE)')
+        plt.title('DDPM Training Loss Curve')
+        plt.legend()
+        plt.grid(alpha=0.3)
+        plt.show()
+
+    def plot_beta_schedule(betas, save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        plt.plot(betas)
+        plt.xlabel('Timestep')
+        plt.ylabel('Beta')
+        plt.title('Diffusion Beta Schedule')
+        plt.grid(True)
+        out_path = os.path.join(save_dir, "ddpm_loss_curve.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Plot loss curve → {out_path}")
+
+    @staticmethod
+    def plot_noising_process(original_img, noise_fn, num_steps=5, save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        timesteps = np.linspace(0, 1, num_steps)
+        fig, axes = plt.subplots(1, num_steps, figsize=(15,3))
+        for i, t in enumerate(timesteps):
+            noisy_img = noise_fn(original_img, t)
+            axes[i].imshow(noisy_img, cmap='viridis')
+            axes[i].set_title(f't={t:.2f}')
+            axes[i].axis('off')
+        plt.suptitle('Noising Process Visualization')
+        out_path = os.path.join(save_dir, "ddpm_noise_loss.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Noise loss per step → {out_path}")
+
+    def plot_sampling_progress(num_timesteps,model, shape, num_steps=6,
+                               device='cpu', save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        model.eval()
+        imgs = []
+        x = torch.randn(shape, device=device)
+        timesteps = np.linspace(num_timesteps - 1, 0, num_steps, dtype=int)
+        for t in timesteps:
+            x = model.p_sample(x, t)
+            imgs.append(x.detach().cpu().numpy()[0,0])
+        fig, axes = plt.subplots(1, num_steps, figsize=(15,3))
+        for i, img in enumerate(imgs):
+            axes[i].imshow(img, cmap='viridis')
+            axes[i].set_title(f'Step {timesteps[i]}')
+            axes[i].axis('off')
+        plt.suptitle('Reverse Diffusion Trajectory')
+        out_path = os.path.join(save_dir, "ddpm_sampling_progress.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Sampling progess → {out_path}")
+
+    @staticmethod
+    def compare_generated_vs_real(real_imgs, generated_imgs, n=5, save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        fig, axes = plt.subplots(2, n, figsize=(15,6))
+        for i in range(n):
+            axes[0,i].imshow(real_imgs[i], cmap='viridis')
+            axes[0,i].set_title('Real')
+            axes[0,i].axis('off')
+            axes[1,i].imshow(generated_imgs[i], cmap='viridis')
+            axes[1,i].set_title('Generated')
+            axes[1,i].axis('off')
+        plt.suptitle('Real vs Generated Histograms')
+        out_path = os.path.join(save_dir, "ddpm_generated_vs_real.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Generated vs Real → {out_path}")
+
+    @staticmethod
+    def plot_latent_space(embeddings, labels, save_dir="plots/ddpm_training", show=True):
+        DDPM_utils._ensure_dir(save_dir)
+        pca = PCA(n_components=2).fit_transform(embeddings)
+        plt.figure(figsize=(6,5))
+        scatter = plt.scatter(pca[:,0], pca[:,1], c=labels, cmap='tab10', alpha=0.7)
+        plt.title('Latent Space Projection')
+        plt.colorbar(scatter)
+        out_path = os.path.join(save_dir, "ddpm_latent_space.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        else:
+            plt.close()
+        print(f"[Saved] Latent space → {out_path}")
