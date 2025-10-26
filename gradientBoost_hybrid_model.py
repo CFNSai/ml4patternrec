@@ -372,7 +372,10 @@ class GradientBoostHybrid:
             noise = tf.random.normal(tf.shape(x0))
             coef1 = DDPM_utils.extract(tf.sqrt(self.alphas_cumprod), t, x0.shape)
             coef2 = DDPM_utils.extract(tf.sqrt(1.0 - self.alphas_cumprod), t, x0.shape)
-            x_noisy = coef1*x0 + coef2*noise
+            sqrt_alpha_bar = tf.sqrt(tf.gather(alphas_cumprod, t))
+            sqrt_one_minus_alpha_bar = tf.sqrt(1 - tf.gather(alphas_cumprod, t))
+            x_noisy = sqrt_alpha_bar[:, None, None, None] * x0 + sqrt_one_minus_alpha_bar[:, None, None, None] * noise
+            #x_noisy = coef1*x0 + coef2*noise
 
             with tf.GradientTape() as tape:
                 #Model expects inputs: [imp,t,class_id,aux_scalar]
