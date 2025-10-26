@@ -23,8 +23,23 @@ class DDPM_utils:
     #####################
     # Schedule Utilities
     #####################
-    def make_beta_schedule(timesteps: int, beta_start=1e-4, beta_end=2e-2):
-        return np.linspace(beta_start, beta_end, timesteps, dtype=np.float32)
+    def make_beta_schedule(timesteps: int, beta_start=1e-4, beta_end=2e-2, schedule='cosine'):
+        """Return a beta schedule for diffusion."""
+        if schedule == 'linear':
+            betas = np.linspace(beta_start, beta_end, timesteps, dtype=np.float32)
+
+        elif schedule == 'quadratic':
+            betas = (np.linspace(beta_start**0.5, beta_end**0.5, timesteps) ** 2).astype(np.float32)
+
+        elif schedule == 'cosine':
+            steps = np.linspace(0, timesteps, timesteps + 1, dtype=np.float32)
+            alphas = np.cos(((steps / timesteps) + 0.008) / 1.008 * np.pi / 2) ** 2
+            alphas = alphas / alphas[0]
+            betas = 1 - (alphas[1:] / alphas[:-1])
+            betas = np.clip(betas, 1e-5, 0.999).astype(np.float32)
+        else:
+            raise ValueError(f"Unknown schedule: {schedule}")
+        return betas
 
     def _ensure_dir(path):
         """Utility to ensure a directory exists."""
@@ -317,6 +332,23 @@ class DDPM_utils:
             plt.close()
         print(f"[Saved] Plot beta scheduler → {out_path}")
 
+        # plot cumulative alpha
+        alphas = 1. - betas
+        alphas_cumprod = np.cumprod(alphas)
+        plt.figure(figsize=(6, 4))
+        plt.plot(alphas_cumprod, label="α̅_t", color='darkorange')
+        plt.title("Cumulative Alpha $(\\alpha_{t})$")
+        plt.xlabel("Timestep")
+        plt.ylabel("$\\alpha{_t}$")
+        plt.legend()
+        plt.grid(alpha=0.3)
+        out_path = os.path.join(save_dir, "alpha_cumprod.png")
+        plt.savefig(out_path, bbox_inches='tight')
+        if show:
+            plt.show()
+        plt.close()
+        print(f"[Saved] Cumulative alpha plot → {out_path}")
+
     @staticmethod
     def plot_noising_process(original_img, noise_fn, num_steps=5, save_dir="plots/ddpm_training", show=True):
         DDPM_utils._ensure_dir(save_dir)
@@ -359,6 +391,18 @@ class DDPM_utils:
         else:
             plt.close()
         print(f"[Saved] Sampling progess → {out_path}")
+
+    def plot_ddpm_noising_example(self, sample_img, betas, save_dir):
+        """Visualize the forward diffusion (noising) process."""
+        alphas_cumprod = np.cumprod(1 - betas)
+
+        def noise_fn(img, t_scalar):
+            t_index = int(t_scalar * (len(betas) - 1))
+            alpha_bar = alphas_cumprod[t_index]
+            noise = np.random.randn(*img.shape)
+            return np.sqrt(alpha_bar) * img + np.sqrt(1 - alpha_bar) * noise
+
+        DDPM_utils.plot_noising_process(sample_img, noise_fn, num_steps=6, save_dir=save_dir, show=False)
 
     @staticmethod
     def compare_generated_vs_real(real_imgs, generated_imgs, n=5, save_dir="plots/ddpm_training", show=True):

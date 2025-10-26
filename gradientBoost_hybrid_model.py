@@ -322,7 +322,8 @@ class GradientBoostHybrid:
 
         return coef1*x_start + coef2*noise
 
-    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, device=None, path='plots/ddpm_training', show=True):
+    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, beta_schedule='cosine',
+                   device=None, path='plots/ddpm_training', show=True):
         '''
         Train DDPM (predict noise) on the set of images + conditioning label + aux scaler
         '''
@@ -351,11 +352,14 @@ class GradientBoostHybrid:
         if self.diffusion_model is None:
             self.build_diffusion_model(n_classes=len(np.unique(y)))
         optimizer = keras.optimizers.Adam(learning_rate=lr)
+        mse = tf.keras.losses.MeanSquaredError()
 
         #training loop:
         T = self.ddpm_timesteps
-        betas = tf.constant(self.betas)
-        alphas_cumprod = tf.constant(self.alphas_cumprod)
+        betas = DDPM_utils.make_beta_schedule(self.ddpm_timesteps, schedule=beta_schedule)
+        alphas = 1. - betas
+        alphas_cumprod = np.cumprod(alphas)
+        self.ddpm_betas = betas
 
         #Dataset
         ds = tf.data.Dataset.from_tensor_slices((X,y,aux)).shuffle(1024).batch(batch_size)
@@ -373,7 +377,7 @@ class GradientBoostHybrid:
             with tf.GradientTape() as tape:
                 #Model expects inputs: [imp,t,class_id,aux_scalar]
                 noise_pred = self.diffusion_model([x_noisy, t, labels, aux_scalar],training=True)
-                loss = tf.reduce_mean(tf.square(noise - noise_pred))
+                loss = mse(noise, noise_pred)
             grads = tape.gradient(loss, self.diffusion_model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.diffusion_model.trainable_variables))
             
