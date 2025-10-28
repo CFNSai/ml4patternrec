@@ -384,16 +384,21 @@ class PerformancePlotter:
         if timesteps is None:
             timesteps = [900, 700, 500, 300, 100, 0]
         
-        #Prepare inputs
         real_img = np.expand_dims(np.squeeze(real_img), axis=0)  # shape (1, H, W)
         real_img = tf.convert_to_tensor(real_img, dtype=tf.float32)
+        #real_tensor = tf.convert_to_tensor(real_img, dtype=tf.float32)
         
+        # --- initialize DDPM parameters ---
+        alphas = hybrid_model.alphas
+        alphas_cumprod = np.cumprod(alphas)
+        T = len(alphas)
+
         cls_ids = tf.convert_to_tensor([class_id], dtype=tf.int32)
         aux_scalars = tf.convert_to_tensor([[aux_val]], dtype=tf.float32)
         
         betas = tf.cast(hybrid_model.betas, tf.float32)
         alphas_cumprod = tf.cast(hybrid_model.alphas_cumprod, tf.float32)
-        
+
         #Plot setup
         fig, axes = plt.subplots(1, len(timesteps) + 2, figsize=(3 * (len(timesteps) + 2), 3))
         
@@ -437,19 +442,20 @@ class PerformancePlotter:
         
         #Show the fully denoised last prediction
         x0_np = x0_pred.numpy()
-        # Remove batch dimension if present
         if x0_np.ndim == 4:
             x0_np = x0_np[0]
-        # Collapse multi-channel outputs to a single 2D image
-        if x0_np.ndim == 3 and x0_np.shape[-1] > 1:
+        # handle shape (64, 64, 64) by averaging across channels
+        if x0_np.ndim == 3 and x0_np.shape[-1] not in [1, 3, 4]:
             img_to_plot = np.mean(x0_np, axis=-1)
+        elif x0_np.ndim == 3 and x0_np.shape[-1] in [1, 3, 4]:
+            img_to_plot = np.squeeze(x0_np)
         else:
             img_to_plot = np.squeeze(x0_np)
-        # Ensure a valid 2D shape for Matplotlib
-        if img_to_plot.ndim != 2:
-            img_to_plot = np.mean(img_to_plot, axis=0)
 
-        axes[-1].imshow(np.squeeze(x0_pred.numpy()), cmap='viridis')
+        # normalize for visibility
+        img_to_plot = (img_to_plot - img_to_plot.min()) / (img_to_plot.max() - img_to_plot.min() + 1e-8)
+
+        axes[-1].imshow(img_to_plot, cmap='viridis')
         axes[-1].set_title("Final Denoised")
         axes[-1].axis("off")
         
@@ -460,6 +466,64 @@ class PerformancePlotter:
         if show:
             plt.show()
         plt.close()
+        
+        # --- deterministic reconstruction path ---
+        print("Computing deterministic reconstruction (posterior mean)...")
+        #Prepare inputs
+        x0_clean = tf.convert_to_tensor(real_img, dtype=tf.float32)
+        if x0_clean.ndim == 2:
+            x0_clean = tf.expand_dims(x0_clean, axis=(0, -1))  # (1,H,W,1)
+
+        # --- forward diffuse to x_T (noisy image) ---
+        t_T = T // 2
+        noise = tf.random.normal(x0_clean.shape)
+        x_t = (
+            tf.sqrt(alphas_cumprod[t_T]) * real_img
+            + tf.sqrt(1 - alphas_cumprod[t_T]) * noise
+        )
+
+        #x_t = tf.identity(real_img)
+        for t_idx in reversed(range(t_T)):
+            # Ensure x_t has shape (1, H, W, 1)
+            x_np = x_t.numpy()
+            if x_np.ndim == 4 and x_np.shape[-1] > 1:
+                x_np = np.mean(x_np, axis=-1, keepdims=True)
+            x_t = tf.convert_to_tensor(x_np, dtype=tf.float32)
+            
+            # Predict noise
+            t_steps = tf.fill((1,), tf.cast(t_idx, tf.int32))
+            pred_noise = hybrid_model.diffusion_model(
+                [x_t, t_steps, cls_ids, aux_scalars], training=False
+            )
+            
+            # Compute posterior mean (deterministic step)
+            alpha_bar_t = alphas_cumprod[t_idx]
+            x_t = (x_t - tf.sqrt(1 - alpha_bar_t) * pred_noise) / tf.sqrt(alpha_bar_t)
+        
+        x_reconstructed = np.squeeze(x_t.numpy())
+        if x_reconstructed.ndim == 3 and x_reconstructed.shape[-1] > 1:
+            x_reconstructed = np.mean(x_reconstructed, axis=-1)
+        x_reconstructed = (x_reconstructed - x_reconstructed.min()) / (
+            x_reconstructed.max() - x_reconstructed.min() + 1e-8
+        )
+        
+        # --- show reconstruction vs original ---
+        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
+        axes[0].imshow(np.squeeze(real_img[0]), cmap="viridis")
+        axes[0].set_title("Original Input Histogram")
+        axes[0].axis("off")
+        
+        axes[1].imshow(x_reconstructed, cmap="viridis")
+        axes[1].set_title("Deterministic Reconstruction")
+        axes[1].axis("off")
+        
+        plt.tight_layout()
+        save_path = os.path.join(self.save_dir, "ddpm_reconstruction_comparison.png")
+        if show:
+            plt.show()
+        plt.close()
+        
+        return x_reconstructed
 
     def generate_summary_report(self, y_true, y_pred, model_name='Model'):
         """Generate and save a text summary report"""
