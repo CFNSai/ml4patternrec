@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 from utilityddpm import DDPM_utils
+from plotting_utility import PerformancePlotter, evaluate_and_plot_all
 
 import pickle
 import uproot as ur
@@ -94,10 +95,14 @@ class GradientBoostHybrid:
         self.alphas_cumprod_prev = np.append(1.0,self.alphas_cumprod[:-1]).astype(np.float32)
         self.shape = hist_shape #target image size for diffusion
         self.diffusion_model = None
+        self.diffusion_compiled = False
 
         #Model dir
         self.model_dir = model_dir
         os.makedirs(self.model_dir, exist_ok=True)
+
+        #Create plotter and generate necessary plots
+        self.plotter = PerformancePlotter(save_dir='plots/xgboost_performance')
 
     def _get_th2_bin_index(self,row: pd.Series) -> int:
         x_var,y_var = self.branch_name
@@ -301,9 +306,9 @@ class GradientBoostHybrid:
             # default (will be re-fit when training)
             n_classes = 32
 
-        input_shape = (self.hist_shape, 1)
+        input_shape = (*self.hist_shape, 1)
         #Create model where class embedding will be handled via class id input
-        self.diffusion_model = self.ddmp.make_unet2d(imput_shape=input_shape, base_channels=32)
+        self.diffusion_model = self.ddmp.make_unet2d(input_shape=input_shape, base_channels=32)
         #compile will be handled in train
         self.n_classes = n_classes
         return self.diffusion_model
@@ -330,7 +335,7 @@ class GradientBoostHybrid:
         if not TF_AVAILABLE:
             raise RuntimeError("TensorFlow not available for DDPM.")
         device = device or ("/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0")
-        if self.diffusion_model is None:
+        if self.diffusion_model is None or not self.diffusion_compiled:
             # if no model, build base model
             self.diffusion_model = DDPM_utils.make_unet2d(input_shape=(*self.hist_shape, 1))
         #imgs (N,H,W)
@@ -345,6 +350,8 @@ class GradientBoostHybrid:
 
         #Prepare tensors
         X = imgs[..., np.newaxis].astype(np.float32)
+        # Normalize to [-1, 1] for better training
+        X = (X - 0.5) * 2.0
         y = labels_enc.astype(np.int32)
         aux = auxs.astype(np.float32)
 
@@ -358,7 +365,7 @@ class GradientBoostHybrid:
         T = self.ddpm_timesteps
         betas = DDPM_utils.make_beta_schedule(self.ddpm_timesteps, schedule=beta_schedule)
         alphas = 1. - betas
-        alphas_cumprod = np.cumprod(alphas)
+        alphas_cumprod = np.cumprod(alphas).astype(np.float32)
         self.ddpm_betas = betas
 
         #Dataset
@@ -379,8 +386,10 @@ class GradientBoostHybrid:
 
             with tf.GradientTape() as tape:
                 #Model expects inputs: [imp,t,class_id,aux_scalar]
+                labels = tf.convert_to_tensor(labels, dtype=tf.int32)
+                aux_scalar = tf.convert_to_tensor(aux_scalar, dtype=tf.float32)
                 noise_pred = self.diffusion_model([x_noisy, t, labels, aux_scalar],training=True)
-                loss = mse(noise, noise_pred)
+                loss = tf.reduce_mean(tf.square(noise - noise_pred))
             grads = tape.gradient(loss, self.diffusion_model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.diffusion_model.trainable_variables))
             
@@ -399,7 +408,7 @@ class GradientBoostHybrid:
             avg_loss /= max(1,steps)
             train_losses.append(avg_loss)
             print(f'[DDPM] Epoch {epoch+1}/{epochs} - loss: {avg_loss:.6f} - time: {time.time()-t0:.1f}s')
-        self.diffusion_compile = True
+        self.diffusion_compiled = True
         print('DDPM training is complete...')
         if show:
             DDPM_utils.plot_loss_curve(train_losses=train_losses,save_dir=path,show=show)
@@ -419,24 +428,32 @@ class GradientBoostHybrid:
         aux_scalars: shape (n_samples,1) float array
         '''
         if self.diffusion_model is None or not self.diffusion_compiled:
-            raise RuntimeError('No trained diffusion model available. Run train_ddpm firs or load one...')
+            raise RuntimeError('No trained diffusion model available. Run train_ddpm first or load one...')
 
-        device = device or ('/GPU:0' if tf.config.list_physicsl_devices('GPU') else '/CPU:0')
+        device = device or ("/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0")
         T = self.ddpm_timesteps
-        betas = self.betas
-        alphas = self.alphas
-        alphas_cumprod = self.alphas_cumprod
-        alphas_cumprod_prev = self.alphas_cumprod_prev
+        betas = tf.cast(self.betas, tf.float32)
+        alphas = tf.cast(self.alphas, tf.float32)
+        alphas_cumprod = tf.cast(self.alphas_cumprod, tf.float32)
+        alphas_cumprod_prev = tf.cast(self.alphas_cumprod_prev, tf.float32)
 
         #Prepare conditioning
         if class_ids is None:
             class_ids = [0]*n_samples
         if aux_scalars is None:
-            aux = np.zeros((n_samples,1),dtype=np.float32)
+            aux_scalars = np.zeros((n_samples,1),dtype=np.float32)
+        else:
+            #ensure correct shape
+            aux_scalars = np.array(aux_scalars, dtype=np.float32)
+            if aux_scalars.ndim == 1:
+                aux_scalars = aux_scalars[:, None]
 
+        if aux_scalars is None or np.any(np.isnan(aux_scalars)):
+            print("aux_scalars None or invalid — defaulting to zeros")
+            aux_scalars = np.zeros((n_samples, 1), dtype=np.float32)
         #If original labels were encoded, map provided class IDs (if they are raw pdgIDs)
         #If user passed pdgID values, convert via label_encoder
-        cls_ids_arr = np.array(class_ids, dtype=float32)
+        cls_ids_arr = np.array(class_ids, dtype=np.float32)
         if self.label_encoder is not None:
             #if class_ids appear to be raw pdg (not encoded), attempt inverse map
             #try mapping provided values if they exist in encoder classes
@@ -448,9 +465,11 @@ class GradientBoostHybrid:
         shape = (n_samples, *self.hist_shape, 1)
         x_t = tf.random.normal(shape, dtype=tf.float32)
 
-        for t_idx in reverse(range(T)):
-            t_step = tf.fill((n_samples), tf.cast(t_idx,tf.int32))
+        for t_idx in reversed(range(T)):
+            t_steps = tf.fill((n_samples), tf.cast(t_idx,tf.int32))
             #predict noise
+            cls_ids_arr = tf.convert_to_tensor(cls_ids_arr, dtype=tf.int32)
+            aux_scalars = tf.convert_to_tensor(aux_scalars, dtype=tf.float32)
             pred_noise = self.diffusion_model([x_t, t_steps, cls_ids_arr, aux_scalars],training=False)
             #Compute posterior mean and variance
             beta_t = betas[t_idx]
@@ -478,6 +497,7 @@ class GradientBoostHybrid:
         #(n_samples,H,W)
         out = x_t.numpy().squeeze(-1)
         #rescale back to [0,1] if necessary - model on [0,1]
+        out = (out + 1.0) / 2.0
         out = np.clip(out, 0.0, 1.0)
         return out
 
@@ -497,14 +517,14 @@ class GradientBoostHybrid:
     def load_ddpm(self, path='saved_models'):
         #load arrays
         self.betas = np.load(os.path.join(path,'ddpm_betas.npy'))
-        self.alphas_cumprod = np.load(os.path.join(path,'ddpm_alphas_cumprod.np'))
+        self.alphas_cumprod = np.load(os.path.join(path,'ddpm_alphas_cumprod.npy'))
         #rebuild model with hist_shape and load weights
         self.build_diffusion_model(n_classes=len(self.label_encoder.classes_) if self.label_encoder is not None else None)
         self.diffusion_model.load_weights(os.path.join(path,'ddpm.weights.h5'))
         #load label encoder if present
         le_path = os.path.join(path,'label_encoder.pkl')
         if os.path.exists(le_path):
-            self.laebl_encoder = joblib.load(le_path)
+            self.label_encoder = joblib.load(le_path)
         self.diffusion_compiled = True
         print(f'Loaded DDPM checkpoint from {path}')
 
@@ -603,7 +623,7 @@ class GradientBoostHybrid:
 
         #Predict
         preds = self.xgb_model.predict(dmatrix)
-        laebls = self.label_encoder.inverse_transform(preds.astype(int))
+        labels = self.label_encoder.inverse_transform(preds.astype(int))
 
         #Attach predictions
         df['prediction'] = labels
@@ -735,6 +755,7 @@ class GradientBoostHybrid:
         T = self.ddpm_timesteps
         alphas_cum = tf.constant(self.alphas_cumprod, dtype=tf.float32)
         X = imgs[..., np.newaxis].astype(np.float32)
+        X = (X - 0.5) * 2.0  # Normalize to [-1, 1]
         y = labels_enc.astype(np.int32)
         aux = auxs.astype(np.float32)
         ds = tf.data.Dataset.from_tensor_slices((X, y, aux)).shuffle(1024).batch(batch_size).prefetch(2)

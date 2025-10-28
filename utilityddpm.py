@@ -162,7 +162,7 @@ class DDPM_utils:
         cond = layers.Dense(base_channels * 2, activation="relu")(cond)
 
         x = layers.Concatenate()([x, cond])
-        x = layers.Dense(np.prod(input_shape), activation=None)(x)
+        x = layers.Dense(np.prod(input_shape), activation='tanh')(x)
         out = layers.Reshape(input_shape)(x)
 
         model = keras.Model([img_in, t_in, cls_in, aux_in],out, name='unet2d')
@@ -407,7 +407,15 @@ class DDPM_utils:
     @staticmethod
     def compare_generated_vs_real(real_imgs, generated_imgs, n=5, save_dir="plots/ddpm_training", show=True):
         DDPM_utils._ensure_dir(save_dir)
-        fig, axes = plt.subplots(2, n, figsize=(15,6))
+        real_imgs = np.array(real_imgs)
+        generated_imgs = np.array(generated_imgs)
+        n = min(n, len(real_imgs), len(generated_imgs))
+        fig, axes = plt.subplots(2, n, figsize=(3*n,6))
+
+        #Handle different shapes of axes returned by matplotlib
+        if n == 1:
+            axes = np.expand_dims(axes, axis=1)  # make it 2D (2, 1)
+            
         for i in range(n):
             axes[0,i].imshow(real_imgs[i], cmap='viridis')
             axes[0,i].set_title('Real')
