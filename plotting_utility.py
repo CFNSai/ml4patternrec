@@ -340,7 +340,7 @@ class PerformancePlotter:
         
         for t_idx in reversed(range(hybrid_model.ddpm_timesteps)):
             t_steps = tf.fill((n,), tf.cast(t_idx, tf.int32))
-            pred_noise = hybrid_model.diffusion_model([x_t, t_steps, cls_ids, aux_scalars], training=False)
+            pred_noise = hybrid_model.diffusion_model(x_t, t_steps, cls_ids, aux_scalars, training=False)
         
             alpha_t = alphas[t_idx]
             alpha_bar_t = alphas_cumprod[t_idx]
@@ -368,6 +368,7 @@ class PerformancePlotter:
         
         save_path = os.path.join(self.save_dir, 'ddpm_denoising_progression.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"✓ Saved training curves: {save_path}")
         if show:
             plt.show()
         plt.close()
@@ -415,7 +416,7 @@ class PerformancePlotter:
             noise = tf.random.normal(tf.shape(real_img))
             x_t = tf.sqrt(alpha_bar_t) * real_img + tf.sqrt(1 - alpha_bar_t) * noise
             
-            pred_noise = hybrid_model.diffusion_model([x_t, t_steps, cls_ids, aux_scalars], training=False)
+            pred_noise = hybrid_model.diffusion_model(x_t, t_steps, cls_ids, aux_scalars, training=False)
             x0_pred = (x_t - tf.sqrt(1 - alpha_bar_t) * pred_noise) / tf.sqrt(alpha_bar_t)
             
             #Handle multi-channel output
@@ -463,6 +464,7 @@ class PerformancePlotter:
         
         save_path = os.path.join(self.save_dir, "ddpm_denoised_sample.png")
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"✓ Saved training curves: {save_path}")
         if show:
             plt.show()
         plt.close()
@@ -493,7 +495,7 @@ class PerformancePlotter:
             # Predict noise
             t_steps = tf.fill((1,), tf.cast(t_idx, tf.int32))
             pred_noise = hybrid_model.diffusion_model(
-                [x_t, t_steps, cls_ids, aux_scalars], training=False
+                x_t, t_steps, cls_ids, aux_scalars, training=False
             )
             
             # Compute posterior mean (deterministic step)
@@ -519,6 +521,7 @@ class PerformancePlotter:
         
         plt.tight_layout()
         save_path = os.path.join(self.save_dir, "ddpm_reconstruction_comparison.png")
+        print(f"✓ Saved training curves: {save_path}")
         if show:
             plt.show()
         plt.close()

@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 from utilityddpm import DDPM_utils
+from hybrid_unetdit_tf import HybridUNetDiT_TF, EMA
 from plotting_utility import PerformancePlotter, evaluate_and_plot_all
 
 import pickle
@@ -96,6 +97,7 @@ class GradientBoostHybrid:
         self.shape = hist_shape #target image size for diffusion
         self.diffusion_model = None
         self.diffusion_compiled = False
+        self.ema_helper = None
 
         #Model dir
         self.model_dir = model_dir
@@ -308,9 +310,11 @@ class GradientBoostHybrid:
 
         input_shape = (*self.hist_shape, 1)
         #Create model where class embedding will be handled via class id input
-        self.diffusion_model = self.ddmp.make_unet2d(input_shape=input_shape, base_channels=32)
+        self.diffusion_model = HybridUNetDiT_TF(input_shape=input_shape, base_channels=32)
         #compile will be handled in train
-        self.n_classes = n_classes
+        # create EMA model copy
+        self.ema_model = self.diffusion_model.init_ema()
+        self.ema_model.set_weights(self.diffusion_model.get_weights())
         return self.diffusion_model
 
     def q_sample(self, x_start, t, noise):
@@ -322,12 +326,14 @@ class GradientBoostHybrid:
         '''
         sqrt_alphas_cumprod = tf.sqrt(tf.constant(self.alphas_cumprod))
         sqrt_one_minus_alphas_cumprod = tf.sqrt(tf.constant(1.0 - self.alphas_cumprod))
-        coef1 = extract(sqrt_alphas_cumprod, t, x_start.shape)
-        coef2 = extract(sqrt_one_minus_alphas_cumprod, t, x_start.shape)
+        coef1 = DDPM_utils.extract(sqrt_alphas_cumprod, t, x_start.shape)
+        coef2 = DDPM_utils.extract(sqrt_one_minus_alphas_cumprod, t, x_start.shape)
 
         return coef1*x_start + coef2*noise
 
-    def train_ddpm(self, epochs=20, batch_size=1, lr=2e-4, beta_schedule='cosine',
+    def train_ddpm(self, epochs=10, batch_size=8, lr=2e-4, beta_schedule='cosine',
+                   base_ch=32, embed_dim=128, num_heads=4, num_layers=2, groups_gn=8,
+                   time_emb=True, class_emb=True, num_classes=4, self_condition=False, ema_decay=0.999,
                    device=None, path='plots/ddpm_training', show=True):
         '''
         Train DDPM (predict noise) on the set of images + conditioning label + aux scaler
@@ -335,9 +341,6 @@ class GradientBoostHybrid:
         if not TF_AVAILABLE:
             raise RuntimeError("TensorFlow not available for DDPM.")
         device = device or ("/GPU:0" if tf.config.list_physical_devices("GPU") else "/CPU:0")
-        if self.diffusion_model is None or not self.diffusion_compiled:
-            # if no model, build base model
-            self.diffusion_model = DDPM_utils.make_unet2d(input_shape=(*self.hist_shape, 1))
         #imgs (N,H,W)
         imgs, labels_enc, auxs, le = DDPM_utils._load_th2_images(
             inputfiles=self._inputfiles, histogram_name=self.histogram_name,
@@ -345,6 +348,7 @@ class GradientBoostHybrid:
             target = self.target,hist_shape=self.hist_shape,
             x_edges = self.x_edges, y_edges = self.y_edges
         )
+        self.plotter = PerformancePlotter(save_dir=path)
         self.label_encoder = le
         N = imgs.shape[0]
 
@@ -354,10 +358,26 @@ class GradientBoostHybrid:
         X = (X - 0.5) * 2.0
         y = labels_enc.astype(np.int32)
         aux = auxs.astype(np.float32)
+        print(f"[DDPM] Loaded {N} images, hist_shape={self.hist_shape}")
 
-        #build diffusion model if not built
-        if self.diffusion_model is None:
-            self.build_diffusion_model(n_classes=len(np.unique(y)))
+        #Build model if needed
+        if self.diffusion_model is None or not self.diffusion_compiled:
+            # if no model, build base model
+            self.diffusion_model = HybridUNetDiT_TF(
+                input_shape=(*self.hist_shape, 1),
+                base_ch=base_ch,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                num_layers=num_layers,
+                time_emb=time_emb,
+                class_emb=class_emb,
+                aux_emb_dim=32,
+                ema_decay=ema_decay,
+                num_classes=num_classes,
+                self_condition=self_condition)
+            #Create EMA helper
+            self.ema_helper = EMA(self.diffusion_model, decay=ema_decay)
+
         optimizer = keras.optimizers.Adam(learning_rate=lr)
         mse = tf.keras.losses.MeanSquaredError()
 
@@ -381,17 +401,17 @@ class GradientBoostHybrid:
             coef2 = DDPM_utils.extract(tf.sqrt(1.0 - self.alphas_cumprod), t, x0.shape)
             sqrt_alpha_bar = tf.sqrt(tf.gather(alphas_cumprod, t))
             sqrt_one_minus_alpha_bar = tf.sqrt(1 - tf.gather(alphas_cumprod, t))
-            x_noisy = sqrt_alpha_bar[:, None, None, None] * x0 + sqrt_one_minus_alpha_bar[:, None, None, None] * noise
-            #x_noisy = coef1*x0 + coef2*noise
-
+            x_noisy = self.q_sample(x0, t, noise)  # forward diffusion
             with tf.GradientTape() as tape:
                 #Model expects inputs: [imp,t,class_id,aux_scalar]
                 labels = tf.convert_to_tensor(labels, dtype=tf.int32)
                 aux_scalar = tf.convert_to_tensor(aux_scalar, dtype=tf.float32)
-                noise_pred = self.diffusion_model([x_noisy, t, labels, aux_scalar],training=True)
+                noise_pred = self.diffusion_model(x_noisy, t, labels, aux_scalar,training=True)
                 loss = tf.reduce_mean(tf.square(noise - noise_pred))
             grads = tape.gradient(loss, self.diffusion_model.trainable_variables)
             optimizer.apply_gradients(zip(grads, self.diffusion_model.trainable_variables))
+            #Update EMA weights
+            self.ema_helper.update(self.diffusion_model)
             
             return loss
         
@@ -470,7 +490,7 @@ class GradientBoostHybrid:
             #predict noise
             cls_ids_arr = tf.convert_to_tensor(cls_ids_arr, dtype=tf.int32)
             aux_scalars = tf.convert_to_tensor(aux_scalars, dtype=tf.float32)
-            pred_noise = self.diffusion_model([x_t, t_steps, cls_ids_arr, aux_scalars],training=False)
+            pred_noise = self.diffusion_model(x_t, t_steps, cls_ids_arr, aux_scalars,training=False)
             #Compute posterior mean and variance
             beta_t = betas[t_idx]
             sqrt_one_minus_alphas_cumprod_t = math.sqrt(1.0-alphas_cumprod[t_idx])
@@ -486,7 +506,7 @@ class GradientBoostHybrid:
                 #Compute posterior mean
                 coef1 = (betas[t_idx]*np.sqrt(alphas_cumprod_prev[t_idx]))/(1.0-alphas_cumprod[t_idx])
                 coef2 = ((1.0-alphas_cumprod_prev[t_idx])*np.sqrt(alphas[t_idx]))/(1.0-alphas_cumprod[t_idx])
-                mean = coef1*x0_pred + coef1*x_t
+                mean = coef1*x0_pred + coef2*x_t
                 #Sample noise
                 noise = tf.random.normal(shape, dtype=tf.float32)
                 var = betas[t_idx]*(1.0 - alphas_cumprod_prev[t_idx])/(1.0 - alphas_cumprod[t_idx])
