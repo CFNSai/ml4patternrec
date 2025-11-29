@@ -6,6 +6,7 @@ import os
 import math
 import time
 import numpy as np
+import pickle as pkl
 import matplotlib.pyplot as plt
 from matplotlib import gridspec, style
 import matplotlib.colors as mcolors
@@ -30,29 +31,38 @@ class DDPM_utils:
 
         elif schedule == 'quadratic':
             betas = (np.linspace(beta_start**0.5, beta_end**0.5, timesteps) ** 2).astype(np.float32)
-
         elif schedule == 'cosine':
-            steps = np.linspace(0, timesteps, timesteps + 1, dtype=np.float32)
-            alphas = np.cos(((steps / timesteps) + 0.008) / 1.008 * np.pi / 2) ** 2
-            alphas = alphas / alphas[0]
-            betas = 1 - (alphas[1:] / alphas[:-1])
-            betas = np.clip(betas, 1e-5, 0.999).astype(np.float32)
+            '''
+            cosine schedule adapted from Nichol & Dhariwal (improved DDPM)
+            '''
+            steps = np.arange(timesteps + 1, dtype=np.float64)
+            s = 0.008
+            t = steps / timesteps
+            alphas_cumprod = (np.cos(((t + s) / (1 + s)) * np.pi * 0.5) ** 2)
+            alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+            betas = np.clip(1.0 - (alphas_cumprod[1:] / alphas_cumprod[:-1]), 0.0, 0.999).astype(np.float32)
         else:
             raise ValueError(f"Unknown schedule: {schedule}")
-        return betas
+        return betas.astype(np.float32)
 
     def _ensure_dir(path):
         """Utility to ensure a directory exists."""
         os.makedirs(path, exist_ok=True)
         return path
 
-    def extract(a, t, x_shapes):
+    def save_pickle(obj, path):
+        DDPM_utils._ensure_dir(os.path.dirname(path))
+        with open(path, "wb") as f:
+            pkl.dump(obj, f)
+
+    def extract(a: tf.Tensor, t: tf.Tensor, x_shapes):
         '''
         Extract coeff. for batch of timesteps t (shapte [B]) from arry (shape [T])
         and reshape to [B,1,1,1] for broadcasting to images
         '''
         batch_size = tf.shape(t)[0]
         out = tf.gather(a, t)
+        out = tf.cast(out, dtype=tf.float32)
         #reshape to (B,1,1,1)
         return tf.reshape(out, (batch_size, 1, 1, 1))
 
@@ -86,62 +96,6 @@ class DDPM_utils:
         cls_in = keras.Input(shape=(),dtype=tf.int32, name='class_id')
         aux_in = keras.Input(shape=(1,), dtype=tf.float32, name='aux_scaler')
 
-        #Produce dense time embedding
-        '''
-        t_emb = layers.Lambda(lambda : sinusoidal_embedding(x, time_embed_dim))(t_in)
-        t_emb = layers.Dense(time_embed_dim, activation='swish')(t_emb)
-        t_emb = layers.Dense(time_embed_dim, activation='swish')(t_emb)
-
-        #Class embedding
-        n_classes = 1_000
-        cls_emb_layer = layers.Embedding(input_dim=64, output_dim=class_embed_dim)
-
-        #aus scalar embedding
-        aux_emb = layers.Dense(aux_embed_dim, activation='swish')(aux_in)
-
-        #We'll build a small encoder-decoder with FiLM conditioning (scale+shift) using time+class+aux embeddings
-        #Encoder
-        x = img_in
-        #conv block 1
-        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
-        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
-        skip1 = x
-        #Downsample
-        x = layers.AveragePooling2D()(x)
-        #conv block 2
-        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
-        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
-        skip2 = x
-        #Downsample
-        x = layers.AveragePooling2D()(x)
-        #Bottleneck
-        x = layers.Conv2D(base_channels*4, 3, padding='same', activation='relu')(x)
-        x = layers.Conv2D(base_channels*4, 3, padding='same', activation='relu')(x)
-
-        #Combine embeddings: concatenate t_emb, aux_emb, class embedding
-        #Create conditioning vector via dense
-        # shape (B, time+aux+class)
-        cond = layers.Concatenate()([t_emb, aux_emb])
-        cond = layers.Dense(base_channels*4, activation='swish')(cond)
-        cond = layers.Dense(base_channels*4, activation='swish')(cond)
-        #Broadcast and add
-        cond_b = layers.Reshape((1,1,base_channels*4))(cond)
-        x = layers.Add()([x,cond_b])
-
-        #Decoder
-        x = layers.UpSampling2D()(x)
-        x = layers.Concatenate()([x, skip2])
-        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
-        x = layers.Conv2D(base_channels*2, 3, padding='same', activation='relu')(x)
-
-        x = layers.UpSampling2D()(x)
-        x = layers.Concatenate()([x, skip1])
-        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
-        x = layers.Conv2D(base_channels, 3, padding='same', activation='relu')(x)
-
-        #predict noise, no activation
-        out = layers.Conv2D(1,1,padding='same')(x)
-        '''
         #specify output shape explicitly
         t_emb = layers.Lambda(
             lambda x: DDPM_utils.sinusoidal_embedding(x, time_embed_dim),
@@ -373,7 +327,7 @@ class DDPM_utils:
         DDPM_utils._ensure_dir(save_dir)
         model.eval()
         imgs = []
-        x = torch.randn(shape, device=device)
+        x = tf.random.normal(shape, dtype=tf.float32)
         timesteps = np.linspace(num_timesteps - 1, 0, num_steps, dtype=int)
         for t in timesteps:
             x = model.p_sample(x, t)

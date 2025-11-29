@@ -14,6 +14,8 @@ from sklearn.metrics import (
 )
 from sklearn.preprocessing import label_binarize
 import tensorflow as tf
+from typing import List, Tuple, Union, Optional
+from tqdm import tqdm
 
 
 class PerformancePlotter:
@@ -59,12 +61,12 @@ class PerformancePlotter:
         plt.tight_layout()
         save_path = os.path.join(self.save_dir, f'{model_name.lower()}_training_curves.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved training curves: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        print(f"✓ Saved training curves: {save_path}")
     
     def plot_confusion_matrix(self, y_true, y_pred, class_names=None, 
                              model_name='Model', normalize=True, show=True):
@@ -90,12 +92,12 @@ class PerformancePlotter:
         
         save_path = os.path.join(self.save_dir, f'{model_name.lower()}_confusion_matrix.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved confusion matrix: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        print(f"✓ Saved confusion matrix: {save_path}")
     
     def plot_classification_report(self, y_true, y_pred, class_names=None,
                                    model_name='Model', show=True):
@@ -128,12 +130,12 @@ class PerformancePlotter:
         plt.tight_layout()
         save_path = os.path.join(self.save_dir, f'{model_name.lower()}_classification_report.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved classification report: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        print(f"✓ Saved classification report: {save_path}")
         
         return report
     
@@ -210,12 +212,12 @@ class PerformancePlotter:
         plt.tight_layout()
         save_path = os.path.join(self.save_dir, f'{model_name.lower()}_feature_importance.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved feature importance: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        print(f"✓ Saved feature importance: {save_path}")
     
     def plot_ddpm_generated_samples(self, generated_images, real_images=None,
                                    class_labels=None, n_samples=16, show=True):
@@ -241,12 +243,12 @@ class PerformancePlotter:
         
         save_path = os.path.join(self.save_dir, 'ddpm_generated_samples.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved generated samples: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        print(f"✓ Saved generated samples: {save_path}")
     
     def plot_comparison_real_vs_generated(self, real_images, generated_images,
                                          n_pairs=5, show=True):
@@ -269,12 +271,12 @@ class PerformancePlotter:
         
         save_path = os.path.join(self.save_dir, 'ddpm_real_vs_generated.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved comparison: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        print(f"✓ Saved comparison: {save_path}")
     
     def plot_model_comparison(self, results_dict, metric='accuracy', show=True):
         """Compare multiple models on a given metric"""
@@ -301,232 +303,365 @@ class PerformancePlotter:
         plt.tight_layout()
         save_path = os.path.join(self.save_dir, f'model_comparison_{metric}.png')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved model comparison: {save_path}")
         
         if show:
             plt.show()
         else:
             plt.close()
+        plt.close()
+        print(f"✓ Saved model comparison: {save_path}")
     
-    def plot_denoising_progression(self, hybrid_model,
-        timesteps=None, n_samples=1, class_id=0,
-        aux_val=0.0, show=True
-    ):
+    def plot_denoising_progression(self, hybrid_model, timesteps=1000, n_samples=1,
+                               class_id=None, aux_val=0.0, show=True):
         """
-        Visualize the DDPM denoising process step by step.
-        Displays images at selected timesteps from pure noise to denoised output.
-        """
-        
-        if timesteps is None:
-            timesteps = [0, 50, 100, 200, 400, 600, 800, hybrid_model.ddpm_timesteps - 1]
-
-        n = n_samples
-        class_ids = [class_id] * n
-        aux_scalars = np.full((n, 1), aux_val, dtype=np.float32)
-        
-        # initialize random noise
-        shape = (64, 64, 1)  # adjust if your histograms differ
-        x_t = tf.random.normal((n, *shape), dtype=tf.float32)
-        
-        betas = tf.cast(hybrid_model.betas, tf.float32)
-        alphas = tf.cast(hybrid_model.alphas, tf.float32)
-        alphas_cumprod = tf.cast(hybrid_model.alphas_cumprod, tf.float32)
-        alphas_cumprod_prev = tf.cast(hybrid_model.alphas_cumprod_prev, tf.float32)
-        
-        cls_ids = tf.convert_to_tensor(class_ids, dtype=tf.int32)
-        aux_scalars = tf.convert_to_tensor(aux_scalars, dtype=tf.float32)
-        
-        denoised_images = []
-        
-        for t_idx in reversed(range(hybrid_model.ddpm_timesteps)):
-            t_steps = tf.fill((n,), tf.cast(t_idx, tf.int32))
-            pred_noise = hybrid_model.diffusion_model(x_t, t_steps, cls_ids, aux_scalars, training=False)
-        
-            alpha_t = alphas[t_idx]
-            alpha_bar_t = alphas_cumprod[t_idx]
-            beta_t = betas[t_idx]
-        
-            mean = (1.0 / tf.sqrt(alpha_t)) * (x_t - (beta_t / tf.sqrt(1.0 - alpha_bar_t)) * pred_noise)
-        
-            if t_idx > 0:
-                noise = tf.random.normal(tf.shape(x_t))
-                var = beta_t * (1.0 - alphas_cumprod_prev[t_idx]) / (1.0 - alpha_bar_t)
-                x_t = mean + tf.sqrt(var) * noise
-            else:
-                x_t = mean
-        
-            if t_idx in timesteps:
-                denoised_images.append(np.squeeze(x_t.numpy()))
-        
-        # Plot the progression
-        fig, axes = plt.subplots(1, len(denoised_images), figsize=(2.5 * len(denoised_images), 3))
-        for i, img in enumerate(denoised_images):
-            axes[i].imshow(img, cmap="viridis")
-            axes[i].axis("off")
-            axes[i].set_title(f"t={timesteps[i]}")
-        plt.tight_layout()
-        
-        save_path = os.path.join(self.save_dir, 'ddpm_denoising_progression.png')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved training curves: {save_path}")
-        if show:
-            plt.show()
-        plt.close()
-
-    def plot_denoised_sample(
-        self, real_img, hybrid_model,
-        timesteps=None, class_id=0, aux_val=0.0, show=True
-    ):
-        """
-        Plot the denoising of a single real test sample using the trained DDPM.
-        Shows the original, noised, and denoised versions across selected timesteps.
-        """
-        
-        if timesteps is None:
-            timesteps = [900, 700, 500, 300, 100, 0]
-        
-        real_img = np.expand_dims(np.squeeze(real_img), axis=0)  # shape (1, H, W)
-        real_img = tf.convert_to_tensor(real_img, dtype=tf.float32)
-        #real_tensor = tf.convert_to_tensor(real_img, dtype=tf.float32)
-        
-        # --- initialize DDPM parameters ---
-        alphas = hybrid_model.alphas
-        alphas_cumprod = np.cumprod(alphas)
-        T = len(alphas)
-
-        cls_ids = tf.convert_to_tensor([class_id], dtype=tf.int32)
-        aux_scalars = tf.convert_to_tensor([[aux_val]], dtype=tf.float32)
-        
-        betas = tf.cast(hybrid_model.betas, tf.float32)
-        alphas_cumprod = tf.cast(hybrid_model.alphas_cumprod, tf.float32)
-
-        #Plot setup
-        fig, axes = plt.subplots(1, len(timesteps) + 2, figsize=(3 * (len(timesteps) + 2), 3))
-        
-        #Original image
-        axes[0].imshow(np.squeeze(real_img.numpy()), cmap='viridis')
-        axes[0].set_title("Original")
-        axes[0].axis("off")
-        
-        #Loop through timesteps (noised + denoised)
-        for i, t_idx in enumerate(timesteps):
-            t_steps = tf.fill((1,), tf.cast(t_idx, tf.int32))
-            alpha_bar_t = alphas_cumprod[t_idx]
-            
-            noise = tf.random.normal(tf.shape(real_img))
-            x_t = tf.sqrt(alpha_bar_t) * real_img + tf.sqrt(1 - alpha_bar_t) * noise
-            
-            pred_noise = hybrid_model.diffusion_model(x_t, t_steps, cls_ids, aux_scalars, training=False)
-            x0_pred = (x_t - tf.sqrt(1 - alpha_bar_t) * pred_noise) / tf.sqrt(alpha_bar_t)
-            
-            #Handle multi-channel output
-            x0_np = x0_pred.numpy()
-
-            #Remove batch dimension
-            if x0_np.ndim == 4:
-                x0_np = x0_np[0]
-            
-            #Collapse channels if needed
-            if x0_np.ndim == 3 and x0_np.shape[-1] > 1:
-                img_to_plot = np.mean(x0_np, axis=-1)
-            else:
-                img_to_plot = np.squeeze(x0_np)
-            
-            #Ensure final shape is 2D for matplotlib
-            if img_to_plot.ndim != 2:
-                img_to_plot = np.mean(img_to_plot, axis=0)
+        Visualize progressive denoising using the trained DDPM model.
+        Shows how the model reconstructs structure from noise.
  
-            axes[i + 1].imshow(img_to_plot, cmap='viridis')
-            axes[i + 1].set_title(f"Denoised t={t_idx}")
-            axes[i + 1].axis("off")
-
-        
-        #Show the fully denoised last prediction
-        x0_np = x0_pred.numpy()
-        if x0_np.ndim == 4:
-            x0_np = x0_np[0]
-        # handle shape (64, 64, 64) by averaging across channels
-        if x0_np.ndim == 3 and x0_np.shape[-1] not in [1, 3, 4]:
-            img_to_plot = np.mean(x0_np, axis=-1)
-        elif x0_np.ndim == 3 and x0_np.shape[-1] in [1, 3, 4]:
-            img_to_plot = np.squeeze(x0_np)
-        else:
-            img_to_plot = np.squeeze(x0_np)
-
-        # normalize for visibility
-        img_to_plot = (img_to_plot - img_to_plot.min()) / (img_to_plot.max() - img_to_plot.min() + 1e-8)
-
-        axes[-1].imshow(img_to_plot, cmap='viridis')
-        axes[-1].set_title("Final Denoised")
-        axes[-1].axis("off")
-        
-        plt.tight_layout()
-        
-        save_path = os.path.join(self.save_dir, "ddpm_denoised_sample.png")
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"✓ Saved training curves: {save_path}")
-        if show:
-            plt.show()
-        plt.close()
-        
-        # --- deterministic reconstruction path ---
-        print("Computing deterministic reconstruction (posterior mean)...")
-        #Prepare inputs
-        x0_clean = tf.convert_to_tensor(real_img, dtype=tf.float32)
-        if x0_clean.ndim == 2:
-            x0_clean = tf.expand_dims(x0_clean, axis=(0, -1))  # (1,H,W,1)
-
-        # --- forward diffuse to x_T (noisy image) ---
-        t_T = T // 2
-        noise = tf.random.normal(x0_clean.shape)
-        x_t = (
-            tf.sqrt(alphas_cumprod[t_T]) * real_img
-            + tf.sqrt(1 - alphas_cumprod[t_T]) * noise
-        )
-
-        #x_t = tf.identity(real_img)
-        for t_idx in reversed(range(t_T)):
-            # Ensure x_t has shape (1, H, W, 1)
-            x_np = x_t.numpy()
-            if x_np.ndim == 4 and x_np.shape[-1] > 1:
-                x_np = np.mean(x_np, axis=-1, keepdims=True)
-            x_t = tf.convert_to_tensor(x_np, dtype=tf.float32)
-            
-            # Predict noise
-            t_steps = tf.fill((1,), tf.cast(t_idx, tf.int32))
-            pred_noise = hybrid_model.diffusion_model(
+        Args:
+            hybrid_model: trained GradientBoostHybrid instance
+            timesteps: number of diffusion steps (default: 1000)
+            n_samples: number of samples to visualize (default: 1)
+            class_id: optional integer class label for conditional DDPM
+            aux_val: optional scalar conditioning value
+            show: display plots interactively
+        """
+ 
+        print("\n[DDPM] Starting denoising progression visualization...")
+ 
+        # === Load or construct schedule ===
+        betas = hybrid_model.ddpm_betas if hasattr(hybrid_model, "ddpm_betas") else tf.linspace(1e-4, 0.02, timesteps)
+        betas = tf.cast(betas, tf.float32)
+        alphas = 1.0 - betas
+        alphas_cumprod = tf.math.cumprod(alphas, axis=0)
+ 
+        # === Initialize latent noise ===
+        hist_shape = hybrid_model.hist_shape
+        x_t = tf.random.normal((n_samples, *hist_shape, 1), dtype=tf.float32)
+        print(f"[Info] Starting from random noise: shape={x_t.shape}")
+ 
+        # === Class & auxiliary conditioning ===
+        cls_ids = tf.zeros((n_samples,), dtype=tf.int32) if class_id is None else tf.fill((n_samples,), int(class_id))
+        aux_scalars = tf.ones((n_samples, 1), dtype=tf.float32) * float(aux_val)
+ 
+        # === Set up visualization ===
+        fig, axes = plt.subplots(1, 10, figsize=(20, 2))
+        vis_steps = np.linspace(0, timesteps - 1, 10, dtype=int)
+        img_buffer = []
+ 
+        # === Reverse (denoising) process ===
+        for t_idx in tqdm(reversed(range(timesteps)), desc="Denoising", total=timesteps):
+            t_steps = tf.fill((n_samples,), tf.cast(t_idx, tf.int32))
+ 
+            # Predict noise ε_θ(x_t, t)
+            eps_pred = hybrid_model.diffusion_model(
                 x_t, t_steps, cls_ids, aux_scalars, training=False
             )
-            
-            # Compute posterior mean (deterministic step)
+            eps_pred = tf.cast(eps_pred, tf.float32)
+ 
+            alpha_t = alphas[t_idx]
             alpha_bar_t = alphas_cumprod[t_idx]
-            x_t = (x_t - tf.sqrt(1 - alpha_bar_t) * pred_noise) / tf.sqrt(alpha_bar_t)
-        
-        x_reconstructed = np.squeeze(x_t.numpy())
-        if x_reconstructed.ndim == 3 and x_reconstructed.shape[-1] > 1:
-            x_reconstructed = np.mean(x_reconstructed, axis=-1)
-        x_reconstructed = (x_reconstructed - x_reconstructed.min()) / (
-            x_reconstructed.max() - x_reconstructed.min() + 1e-8
-        )
-        
-        # --- show reconstruction vs original ---
-        fig, axes = plt.subplots(1, 2, figsize=(8, 4))
-        axes[0].imshow(np.squeeze(real_img[0]), cmap="viridis")
-        axes[0].set_title("Original Input Histogram")
-        axes[0].axis("off")
-        
-        axes[1].imshow(x_reconstructed, cmap="viridis")
-        axes[1].set_title("Deterministic Reconstruction")
-        axes[1].axis("off")
-        
+            sqrt_alpha_t = tf.sqrt(alpha_t)
+            sqrt_one_minus_alpha_bar_t = tf.sqrt(1.0 - alpha_bar_t)
+ 
+            # Predicted clean image x₀
+            x0_pred = (x_t - sqrt_one_minus_alpha_bar_t * eps_pred) / tf.sqrt(alpha_bar_t)
+            x0_pred = tf.clip_by_value(x0_pred, 0.0, 1.0)
+ 
+            # Deterministic DDIM step (σ_t = 0)
+            if t_idx > 0:
+                alpha_bar_prev = alphas_cumprod[t_idx - 1]
+                c = tf.sqrt(1.0 - alpha_bar_prev)
+                x_t = tf.sqrt(alpha_bar_prev) * x0_pred + c * eps_pred
+            else:
+                x_t = x0_pred
+ 
+            # Save visualization frame every ~T/10 steps
+            if t_idx in vis_steps:
+                img = np.squeeze(x_t[0].numpy())
+                img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+                img_buffer.append(img)
+ 
+        # === Plot denoising frames ===
+        for i, img in enumerate(img_buffer):
+            axes[i].imshow(img, cmap='viridis')
+            axes[i].set_title(f"t={vis_steps[i]}")
+            axes[i].axis("off")
+ 
+        plt.suptitle("Denoising Progression (Reverse Diffusion)")
         plt.tight_layout()
-        save_path = os.path.join(self.save_dir, "ddpm_reconstruction_comparison.png")
-        print(f"✓ Saved training curves: {save_path}")
+ 
+        # === Save ===
+        save_path = os.path.join(self.save_dir, "ddpm_denoising_progression.png")
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
         if show:
             plt.show()
         plt.close()
-        
-        return x_reconstructed
+        print(f"✓ Saved denoising progression → {save_path}")
+ 
+        return img_buffer[-1]  # return final reconstruction
+
+
+    def plot_denoised_sample(
+        self,
+        real_img,
+        hybrid_model,
+        timesteps: int = None,
+        class_id: int = None,
+        aux_val: float = 0.0,
+        noise_level_step: int = None,
+        show: bool = True,
+        save_frames: bool = True,
+        frames_dir: str = None,
+        make_gif: bool = True,
+        gif_name: str = "ddpm_denoising.gif",
+        n_intermediate: int = 10,
+        ddim_eta: float = 0.0,
+        return_as_gif_bytes: bool = False,
+    ):
+        """
+        Visualize DDIM-style deterministic/stochastic denoising with optional frame saving and GIF.
+
+        Args:
+            real_img: np.ndarray or tf.Tensor; (H,W) or (H,W,1)
+            hybrid_model: trained GradientBoostHybrid instance
+            timesteps: total diffusion timesteps (defaults to hybrid_model.ddpm_timesteps)
+            class_id: optional conditioning class id
+            aux_val: auxiliary scalar conditioning (pT, energy)
+            noise_level_step: timestep to start denoising from (defaults to T//2)
+            show: whether to show plots
+            save_frames: whether to save each intermediate frame
+            frames_dir: directory to save intermediate frames
+            make_gif: whether to create GIF from saved frames
+            gif_name: filename for GIF
+            n_intermediate: number of intermediate frames (set 0 for all)
+            ddim_eta: DDIM eta parameter (0 = deterministic, >0 adds stochasticity)
+        Returns:
+            dict: {'reconstructed', 'frames', 'frame_paths', 'gif_path'}
+        """
+        # --- setup and diffusion parameters ---
+        T = timesteps or getattr(hybrid_model, "ddpm_timesteps", None)
+        if T is None:
+            raise RuntimeError("timesteps must be provided or hybrid_model.ddpm_timesteps must exist.")
+
+        if hasattr(hybrid_model, "alphas_cumprod") and hybrid_model.alphas_cumprod is not None:
+            alphas_cumprod_np = np.asarray(hybrid_model.alphas_cumprod, dtype=np.float32)
+        else:
+            betas = np.linspace(1e-4, 2e-2, T, dtype=np.float32)
+            alphas = 1.0 - betas
+            alphas_cumprod_np = np.cumprod(alphas, axis=0).astype(np.float32)
+
+        # --- input prep ---
+        if isinstance(real_img, tf.Tensor):
+            real_img = real_img.numpy()
+        x0 = np.asarray(real_img, dtype=np.float32)
+
+        if x0.ndim == 2:
+            x0 = x0[..., None]
+        if x0.ndim == 3 and x0.shape[-1] != 1:
+            x0 = np.mean(x0, axis=-1, keepdims=True)
+        x0 = np.expand_dims(x0, axis=0) if x0.ndim == 3 else x0[:1]
+        x0 = (x0 - x0.min()) / (x0.max() - x0.min() + 1e-8)
+        x0 = x0.astype(np.float32)
+        n = x0.shape[0]
+
+        # --- conditioning ---
+        if class_id is None:
+            cls_ids = tf.zeros((n,), dtype=tf.int32)
+        else:
+            if getattr(hybrid_model, "label_encoder", None):
+                le = hybrid_model.label_encoder
+                try:
+                    cls_ids = tf.convert_to_tensor(le.transform([class_id]), dtype=tf.int32)
+                except Exception:
+                    cls_ids = tf.fill((n,), int(class_id))
+            else:
+                cls_ids = tf.fill((n,), int(class_id))
+        aux_scalars = tf.fill((n, 1), float(aux_val))
+
+        # --- forward diffuse to noisy sample ---
+        t_T = noise_level_step if noise_level_step is not None else T // 2
+        alpha_bar_T = tf.cast(alphas_cumprod_np[t_T], tf.float32)
+        noise = tf.random.normal(shape=tf.shape(x0), dtype=tf.float32)
+        x_t = tf.sqrt(alpha_bar_T) * x0 + tf.sqrt(1.0 - alpha_bar_T) * noise
+
+        # --- frame bookkeeping ---
+        if frames_dir is None:
+            frames_dir = os.path.join(self.save_dir, "ddpm_frames")
+        if save_frames:
+            os.makedirs(frames_dir, exist_ok=True)
+
+        frames, frame_paths = [], []
+        keep_ts = (
+            sorted(
+                list(
+                    {int(round(t_T * i / max(1, n_intermediate - 1))) for i in range(max(1, n_intermediate))}
+                )
+            )
+            if n_intermediate and n_intermediate > 0
+            else list(range(t_T, -1, -1))
+        )
+
+        # --- reverse denoising (DDIM update) ---
+        x_current = tf.identity(x_t)
+        for t_idx in reversed(range(0, t_T + 1)):
+            t_steps = tf.fill((n,), tf.cast(t_idx, tf.int32))
+            pred_noise = hybrid_model.diffusion_model(x_current, t_steps, cls_ids, aux_scalars, training=False)
+            pred_noise = tf.cast(pred_noise, tf.float32)
+
+            alpha_bar_t = tf.cast(alphas_cumprod_np[t_idx], tf.float32)
+            sqrt_alpha_bar_t = tf.sqrt(alpha_bar_t)
+            sqrt_one_minus_alpha_bar_t = tf.sqrt(1.0 - alpha_bar_t)
+            x0_pred = (x_current - sqrt_one_minus_alpha_bar_t * pred_noise) / (sqrt_alpha_bar_t + 1e-12)
+            x0_pred = tf.clip_by_value(x0_pred, 0.0, 1.0)
+
+            if t_idx > 0:
+                alpha_bar_prev = tf.cast(alphas_cumprod_np[t_idx - 1], tf.float32)
+                sqrt_alpha_bar_prev = tf.sqrt(alpha_bar_prev)
+                ratio = (1.0 - alpha_bar_prev) / (1.0 - alpha_bar_t + 1e-12)
+                sigma_t = ddim_eta * tf.sqrt(tf.clip_by_value(ratio, 0.0, 1e6)) * tf.sqrt(
+                    tf.clip_by_value(1.0 - alpha_bar_t / (alpha_bar_prev + 1e-12), 0.0, 1.0)
+                )
+                coeff_x0 = sqrt_alpha_bar_prev
+                coeff_eps = tf.sqrt(tf.clip_by_value(1.0 - alpha_bar_prev - sigma_t ** 2, 0.0, 1.0))
+                noise_term = tf.random.normal(shape=tf.shape(x_current), dtype=tf.float32) if float(sigma_t) > 0 else tf.zeros_like(x_current)
+                x_current = coeff_x0 * x0_pred + coeff_eps * pred_noise + sigma_t * noise_term
+            else:
+                x_current = x0_pred
+
+            if (t_idx in keep_ts) or (t_idx == 0 and 0 not in keep_ts):
+                img_np = x_current.numpy().squeeze()
+                if img_np.ndim == 3 and img_np.shape[-1] > 1:
+                    img_np = np.mean(img_np, axis=-1)
+                img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min() + 1e-8)
+                frames.append(img_np)
+                if save_frames:
+                    fpath = os.path.join(frames_dir, f"frame_t{t_idx:04d}.png")
+                    plt.imsave(fpath, img_np, cmap="viridis")
+                    frame_paths.append(fpath)
+
+        # --- final reconstruction and visualization ---
+        x_rec = x_current.numpy().squeeze()
+        if x_rec.ndim == 3 and x_rec.shape[-1] > 1:
+            x_rec = np.mean(x_rec, axis=-1)
+        x_rec = (x_rec - x_rec.min()) / (
+            x_rec.max() - x_rec.min() + 1e-8
+        )
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        axes[0].imshow(x0[0, ..., 0], cmap="viridis")
+        axes[0].set_title("Original")
+        axes[1].imshow(x_t.numpy()[0, ..., 0], cmap="viridis")
+        axes[1].set_title(f"Noisy (t={t_T})")
+        axes[2].imshow(x_rec, cmap="viridis")
+        axes[2].set_title("Reconstructed")
+        for ax in axes:
+            ax.axis("off")
+        plt.tight_layout()
+
+        summary_path = os.path.join(self.save_dir, "ddpm_reconstruction_comparison.png")
+        plt.savefig(summary_path, dpi=300, bbox_inches="tight")
+        if show:
+            plt.show()
+        plt.close()
+
+        gif_path = None
+        gif_bytes = None
+ 
+        if make_gif and frame_paths:
+            try:
+                import imageio
+                gif_path = os.path.join(frames_dir, gif_name)
+                imgs = [imageio.imread(f) for f in frame_paths]
+ 
+                if return_as_gif_bytes:
+                    buf = io.BytesIO()
+                    imageio.mimsave(buf, imgs, format="GIF", duration=0.08)
+                    gif_bytes = buf.getvalue()
+                else:
+                    imageio.mimsave(gif_path, imgs, duration=0.08)
+ 
+            except Exception as e:
+                print(f"[GIF ERROR] {e}")
+ 
+        return {
+            "reconstructed": x_rec,
+            "frames": frames,
+            "frame_paths": frame_paths,
+            "gif_path": gif_path,
+            "gif_bytes": gif_bytes,
+        }
+
+    ################################################
+    #         Performance Summary
+    ################################################
+    def plot_joint_performance(self, gbhm_metrics, xgb_metrics, ddpm_metrics, save=True):
+        """
+        Combine GBHM/XGB + DDPM metrics into one figure.
+        gbhm_metrics: dict with keys ['accuracy', 'precision', 'recall', 'f1']
+        xgb_metrics: same structure
+        ddpm_metrics: dict with keys ['loss_curve', 'final_loss', 'recon_mse']
+        """
+        fig, axs = plt.subplots(2, 2, figsize=(14, 10))
+
+        # GBHM vs XGB Accuracy
+        axs[0,0].bar(["GBHM","XGB"],
+                     [gbhm_metrics["accuracy"], xgb_metrics["accuracy"]])
+        axs[0,0].set_title("Classifier Accuracy Comparison")
+        axs[0,0].set_ylim(0, 1)
+
+        # DDPM loss curve
+        axs[0,1].plot(ddpm_metrics["loss_curve"])
+        axs[0,1].set_title(f"DDPM Noise-Prediction Loss (final={ddpm_metrics['final_loss']:.4f})")
+
+        # Reconstruction MSE
+        axs[1,0].bar(["Reconstruction MSE"], [ddpm_metrics["recon_mse"]])
+        axs[1,0].set_title("DDPM Reconstruction Error")
+        axs[1,0].set_ylim(0, max(ddpm_metrics["recon_mse"],0.05))
+
+        # Classifier consistency after DDPM reconstruction
+        axs[1,1].bar(["GBHM Consistency (%)"], [ddpm_metrics["consistency"]*100.0])
+        axs[1,1].set_ylim(0, 100)
+        axs[1,1].set_title("Do DDPM Reconstructions Preserve Classifier Predictions?")
+
+        fig.tight_layout()
+
+        if save:
+            fig.savefig(os.path.join(self.save_dir, "joint_performance.png"), dpi=200)
+
+        return fig
+
+    def generate_combined_report(self, gbhm_metrics, xgb_metrics, ddpm_metrics, label_encoder):
+        """
+        Returns a multi-section summary text report.
+        """
+
+        report = []
+        report.append("==== Combined Model Report ====\n")
+
+        # Label encoder details
+        report.append("LABEL ENCODER")
+        report.append(f"  Classes: {list(label_encoder.classes_)}\n")
+
+        # GBHM summary
+        report.append("GBHM PERFORMANCE")
+        for k,v in gbhm_metrics.items():
+            report.append(f"  {k}: {v:.4f}")
+        report.append("")
+
+        # XGB summary
+        report.append("XGBOOST PERFORMANCE")
+        for k,v in xgb_metrics.items():
+            report.append(f"  {k}: {v:.4f}")
+        report.append("")
+
+        # DDPM summary
+        report.append("DDPM PERFORMANCE")
+        report.append(f"  Final loss: {ddpm_metrics['final_loss']:.4f}")
+        report.append(f"  Reconstruction MSE: {ddpm_metrics['recon_mse']:.4f}")
+        report.append(f"  Classifier consistency: {ddpm_metrics['consistency']*100:.2f}%")
+        report.append("")
+
+        return "\n".join(report)
 
     def generate_summary_report(self, y_true, y_pred, model_name='Model'):
         """Generate and save a text summary report"""
