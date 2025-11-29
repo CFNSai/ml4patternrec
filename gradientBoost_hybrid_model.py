@@ -626,7 +626,7 @@ class GradientBoostHybrid:
                 class_emb=class_emb,
                 aux_emb_dim=32,
                 ema_decay=ema_decay,
-                num_classes=len(np.unique(y)) if len(y)>0 else num_classes,
+                num_classes=len(self.label_encoder.classes_), #len(np.unique(y)) if len(y)>0 else num_classes,
                 self_condition=self_condition)
             print("[DDPM] Built new diffusion model")
             #Create EMA helper
