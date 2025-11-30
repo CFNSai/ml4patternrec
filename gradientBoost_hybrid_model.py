@@ -496,7 +496,7 @@ class GradientBoostHybrid:
         '''
         if n_classes is None and self.label_encoder is not None:
             n_classes = len(self.label_encoder.classes_)
-        elif n_classes in None:
+        elif n_classes is None:
             # default (will be re-fit when training)
             n_classes = 32
 
@@ -1068,7 +1068,8 @@ class GradientBoostHybrid:
         if self.xgb_model is None:
             raise RuntimeError("Model has not been trained yet.")
 
-        importances=pd.Series(self.xgb_model.feature_importances_,index=self.features).sort_values(ascending=False)
+        all_features = self.features + ['bin_index', 'radius']
+        importances=pd.Series(self.xgb_model.feature_importances_,index=all_features).sort_values(ascending=False)
         return importances
 
     def save_xgb_model(self, path_prefix='saved_models/xgb_model'):
@@ -1120,8 +1121,8 @@ class GradientBoostHybrid:
                 count = hist2d.GetBinContent(ix, iy)
                 if count <= 0:
                     continue #skip empty bins
-                x_center = hist2d.GetXaxis().GetBinContent(ix)
-                y_center = hist2d.GetYaxis().GetBinContent(iy)
+                x_center = hist2d.GetXaxis().GetBinCenter(ix)
+                y_center = hist2d.GetYaxis().GetBinCenter(iy)
                 data.append((x_center, y_center, count))
 
         if not data:
@@ -1284,7 +1285,7 @@ class GradientBoostHybrid:
             coef2 = DDPM_utils.extract(tf.sqrt(1.0 - alphas_cum), t, tf.shape(x0))
             x_noisy = coef1 * x0 + coef2 * noise
             with tf.GradientTape() as tape:
-                noise_pred = self.diffusion_model([x_noisy, t, labels, aux_scalar], training=True)
+                noise_pred = self.diffusion_model(x_noisy, t, labels, aux_scalar, training=True)
                 loss = tf.reduce_mean(tf.square(noise - noise_pred))
             grads = tape.gradient(loss, self.diffusion_model.trainable_variables)
             opt.apply_gradients(zip(grads, self.diffusion_model.trainable_variables))
