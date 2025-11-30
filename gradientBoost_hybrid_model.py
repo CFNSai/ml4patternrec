@@ -89,6 +89,15 @@ class GradientBoostHybrid:
         self.xgb_label_encoder: Optional[LabelEncoder] = None
         self.gbhm_label_encoder: Optional[LabelEncoder] = None
 
+        # Feature count trackers for prediction alignment
+        self.xgb_num_features: Optional[int] = None
+        self.gbhm_num_features: Optional[int] = None
+        self.xgb_feature_names: Optional[List[str]] = None
+        self.gbhm_feature_names: Optional[List[str]] = None
+        self.hist_feature_names: Optional[List[str]] = None
+
+        self.hist_shape = hist_shape
+
         self.hist_shape = hist_shape
         self.model = None
         self.ddpm_timesteps = ddpm_timesteps
@@ -461,7 +470,7 @@ class GradientBoostHybrid:
         if self.gbhm_clf is not None and warm_start:
             print("[GBHM] Continuing training from existing GBHM (warm_start=True)...")
             # set n_estimators > current n_estimators and call fit again
-            current_n = getattr(clf, "n_estimators", 0)
+            current_n = getattr(self.gbhm_clf, "n_estimators", 0)
             new_n = max(current_n, n_estimators)
             self.gbhm_clf.set_params(warm_start=True, n_estimators=new_n, learning_rate=learn_rate)
             # Fit will continue from previous trees if warm_start True
