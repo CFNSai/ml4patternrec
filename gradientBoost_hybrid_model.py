@@ -41,7 +41,7 @@ class GradientBoostHybrid:
         - No radius
     """
 
-    def __init__(
+   def __init__(
         self,
         inputfile_name: Union[str, List[str]],
         tree_name: str,
@@ -89,15 +89,20 @@ class GradientBoostHybrid:
         self.label_encoder: Optional[LabelEncoder] = None
         self.xgb_label_encoder: Optional[LabelEncoder] = None
         self.gbhm_label_encoder: Optional[LabelEncoder] = None
+        self.hgbm_label_encoder: Optional[LabelEncoder] = None
 
         # --------------- MODELS -------------------------
         self.xgb_model = None
         self.gbhm_clf = None
+        self.hgbm_clf = None
 
         self.xgb_num_features: Optional[int] = None
         self.gbhm_num_features: Optional[int] = None
+        self.hgbm_num_features: Optional[int] = None   # NEW ✔️
+
         self.xgb_feature_names: Optional[List[str]] = None
         self.gbhm_feature_names: Optional[List[str]] = None
+        self.hgbm_feature_names: Optional[List[str]] = None  # NEW ✔️
         self.hist_feature_names: Optional[List[str]] = None
 
         self.hist_shape = hist_shape
@@ -119,6 +124,7 @@ class GradientBoostHybrid:
 
         # --------------- PLOTTER -------------------------
         self.plotter = PerformancePlotter(save_dir='plots/performance')
+
 
     # --------------------------------------------------------------
     # Helper: compute digitized bin index for histogram consistency
