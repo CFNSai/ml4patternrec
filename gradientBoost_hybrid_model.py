@@ -82,8 +82,8 @@ class GradientBoostHybrid:
         self.max_events = max_events
 
         # --------------- HISTOGRAM GRID -----------------
-        self.x_edges = np.linspace(-650,650,50) if x_edges is None else np.asarray(x_edges)
-        self.y_edges = np.linspace(-650,650,50) if y_edges is None else np.asarray(y_edges)
+        self.x_edges = np.linspace(-650,650,65) if x_edges is None else np.asarray(x_edges)
+        self.y_edges = np.linspace(-650,650,65) if y_edges is None else np.asarray(y_edges)
 
         # --------------- LABEL ENCODERS -----------------
         self.label_encoder: Optional[LabelEncoder] = None
@@ -221,154 +221,86 @@ class GradientBoostHybrid:
 
         return df_all
 
-
     # ===============================================================
-    #                   HISTOGRAM IMAGE ENCODING
-    # ===============================================================
-
-    def encode_histograms(self, imgs, batch_size=64):
-        """
-        Encode TH2 histogram images into a feature vector.
-        If diffusion encoder exists → embed using CNN encoder.
-        Else → fallback to compact hist_to_features().
-        """
-        imgs = np.asarray(imgs)
-
-        # Remove channel dimension if (N,H,W,1)
-        if imgs.ndim == 4 and imgs.shape[-1] == 1:
-            imgs_proc = imgs[..., 0]
-        else:
-            imgs_proc = imgs
-
-        # ----------- Diffusion encoder path (if available) ----------
-        if TF_AVAILABLE and self.diffusion_model is not None and hasattr(self.diffusion_model, "encoder"):
-            encoder = self.diffusion_model.encoder
-            out = []
-            N = imgs_proc.shape[0]
-
-            for i in range(0, N, batch_size):
-                batch = imgs_proc[i:i+batch_size]
-                try:
-                    emb = encoder(batch[..., None], training=False).numpy()
-                except Exception:
-                    emb = encoder(batch.reshape((-1, *self.hist_shape, 1)), training=False).numpy()
-                out.append(emb)
-
-            embeddings = np.vstack(out)
-            self.hist_feature_names = [f"cnn_embed_{i}" for i in range(embeddings.shape[1])]
-            return embeddings
-
-        # ----------- Fallback → compact features -------------------
-        return self.hist_to_features(imgs_proc, n_flat=64)
-
-    # ---------------------------------------------------------------
-    #           Compact Histogram Feature Extractor
-    # ---------------------------------------------------------------
-    def hist_to_features(self, imgs, n_flat=64):
-        """
-        Convert TH2 images to compact numerical features.
-        - Downsample or resize
-        - Flatten
-        - Add global stats
-        """
-        imgs = np.asarray(imgs)
-        if imgs.ndim == 4 and imgs.shape[-1] == 1:
-            imgs = imgs[..., 0]
-
-        N, H, W = imgs.shape
-
-        # 1) Resize to small grid (TensorFlow if available)
-        try:
-            imgs_tf = tf.convert_to_tensor(imgs[..., None], dtype=tf.float32)
-            small = tf.image.resize(
-                imgs_tf,
-                (max(4, H // 8), max(4, W // 8)),
-                method="bilinear"
-            )
-            small = tf.reshape(small, (N, -1)).numpy()
-        except Exception:
-            # Fallback without TF: uniform downsampling by slicing
-            step_h = max(1, H // 8)
-            step_w = max(1, W // 8)
-            small = imgs[:, ::step_h, ::step_w].reshape(N, -1)
-
-        # 2) Pad or truncate to n_flat
-        if small.shape[1] >= n_flat:
-            flat = small[:, :n_flat]
-        else:
-            pad = np.zeros((N, n_flat - small.shape[1]), dtype=small.dtype)
-            flat = np.concatenate([small, pad], axis=1)
-
-        # 3) Add basic global stats
-        means = imgs.mean(axis=(1, 2)).reshape(N, 1)
-        stds = imgs.std(axis=(1, 2)).reshape(N, 1)
-        maxs = imgs.max(axis=(1, 2)).reshape(N, 1)
-
-        feats = np.concatenate([flat, means, stds, maxs], axis=1)
-
-        # Store names
-        self.hist_feature_names = [f"hist_feat_{i}" for i in range(feats.shape[1])]
-        return feats
-
-    # ===============================================================
-    #                   HISTOGRAM + TABULAR ALIGNMENT
+    #          LOAD HISTOGRAM IMAGES (NEW — FROM posX,posY)
     # ===============================================================
     def _load_histogram_images(self):
         """
-        Load TH2 images from ROOT files using DDPM_utils.
+        Build TH2 histogram images directly from the TTree (posX,posY).
+        Ensures PERFECT alignment with the tabular data.
+        """
+        # 1) Load tabular rows (same filtering, same number of events)
+        df = self._load_data()
 
-        Returns:
-            imgs        : numpy array (N, H, W)
-            labels_imgs : numpy array (N,)
-            auxs        : numpy array (N,)
-            le_imgs     : LabelEncoder from DDPM_utils
+        # 2) Build TH2 images from posX,posY
+        imgs = self._build_histogram_images_from_tree(df)
+
+        # 3) Extract labels and auxiliary scalar
+        labels = df[self.target].values
+        auxs   = df[self.aux_scalar_branch].values
+
+        # 4) Build a minimal LabelEncoder for consistency
+        le = LabelEncoder().fit(labels)
+
+        return imgs, labels, auxs, le
+
+
+    def _build_histogram_images_from_tree(self, df):
+        """
+        Build TH2-like images from (posX,posY) coordinates.
+        Perfect alignment: one image per event.
+        """
+        N = df.shape[0]
+        H, W = self.hist_shape
+
+        imgs = np.zeros((N, H, W), dtype=np.float32)
+
+        x_edges = self.x_edges
+        y_edges = self.y_edges
+
+        xbins = len(x_edges) - 1
+        ybins = len(y_edges) - 1
+
+        if xbins != H or ybins != W:
+            raise RuntimeError("x_edges / y_edges inconsistent with hist_shape")
+
+        xs = df[self.branch_name[0]].values
+        ys = df[self.branch_name[1]].values
+
+        x_idx = np.digitize(xs, x_edges) - 1
+        y_idx = np.digitize(ys, y_edges) - 1
+
+        valid = (x_idx >= 0) & (x_idx < W) & (y_idx >= 0) & (y_idx < H)
+
+        imgs[valid, y_idx[valid], x_idx[valid]] = 1.0
+
+        return imgs
+        
+    # ===============================================================
+    #        CONVERT HISTOGRAM IMAGES → FLATTENED FEATURES
+    # ===============================================================
+    def encode_histograms(self, imgs: np.ndarray) -> np.ndarray:
+        """
+        Convert histogram images (N, H, W) → flattened features (N, H*W).
+
+        This ensures:
+          - deterministic mapping
+          - no leak
+          - numerical-friendly feature format
         """
 
-        try:
-            # Force CPU to avoid TensorFlow _EagerConst GPU bug
-            if TF_AVAILABLE:
-                with tf.device("/CPU:0"):
-                    imgs, labels, auxs, le_imgs = DDPM_utils._load_th2_images(
-                        inputfiles=self._inputfiles,
-                        histogram_name=self.histogram_name,
-                        tree_name=self.tree_name,
-                        aux_scalar_branch=self.aux_scalar_branch,
-                        target=self.target,
-                        hist_shape=self.hist_shape,
-                        x_edges=self.x_edges,
-                        y_edges=self.y_edges
-                    )
-            else:
-                imgs, labels, auxs, le_imgs = DDPM_utils._load_th2_images(
-                    inputfiles=self._inputfiles,
-                    histogram_name=self.histogram_name,
-                    tree_name=self.tree_name,
-                    aux_scalar_branch=self.aux_scalar_branch,
-                    target=self.target,
-                    hist_shape=self.hist_shape,
-                    x_edges=self.x_edges,
-                    y_edges=self.y_edges
-                )
-
-        except Exception as e:
-            raise RuntimeError(f"Could not load TH2 histogram images: {e}")
-
-        # --- Ensure numpy format ---
-        imgs = np.asarray(imgs)
-        labels = np.asarray(labels)
-        auxs = np.asarray(auxs)
-
-        # --- Sanity checks ---
         if imgs.ndim != 3:
-            raise RuntimeError(f"Histogram images must be (N,H,W), got {imgs.shape}")
+            raise RuntimeError(f"encode_histograms: expected (N,H,W), got {imgs.shape}")
 
-        if imgs.shape[0] != labels.shape[0]:
-            raise RuntimeError("Mismatch between number of images and labels")
+        N, H, W = imgs.shape
+        feats = imgs.reshape(N, H * W).astype(np.float32)
 
-        if imgs.shape[0] != auxs.shape[0]:
-            raise RuntimeError("Mismatch between number of images and aux scalar values")
+        # store hist feature names once
+        if self.hist_feature_names is None:
+            self.hist_feature_names = [f"hist_{i}" for i in range(H * W)]
 
-        return imgs, labels, auxs, le_imgs
+        return feats
+
 
 
     # ===============================================================
@@ -408,7 +340,7 @@ class GradientBoostHybrid:
         num_boost_round=200,
         test_size=0.2,
         random_state=42,
-        use_histograms=True
+        use_histograms=False
     ):
         """
         Train XGBoost classifier.
@@ -661,6 +593,155 @@ class GradientBoostHybrid:
         print(f"[GBHM] Test Accuracy:     {test_acc:.4f}")
 
         return self.gbhm_clf
+        
+    # ===============================================================
+    #        HIST-GRADIENT BOOSTING (HGBM) – FAST MODERN BOOSTER
+    # ===============================================================
+    def hgbm_train(
+        self,
+        learning_rate: float = 0.1,
+        max_depth: int = None,
+        max_iter: int = 300,
+        test_size: float = 0.3,
+        random_state: int = 42,
+        use_histograms: bool = True,
+    ):
+        """
+        Train a HistGradientBoostingClassifier (modern, very fast).
+        Equivalent to LightGBM-style histogram boosting.
+
+        Key points:
+          - STRICT alignment with TH2 images (same as GBHM)
+          - VERY FAST (seconds vs minutes)
+          - Supports TH2 + tabular features
+          - No warm_start needed (training is extremely fast)
+        """
+
+        from sklearn.ensemble import HistGradientBoostingClassifier
+
+        # -----------------------------------------------------------
+        # 1. Load tabular data
+        # -----------------------------------------------------------
+        df = self._load_data()
+        X_tree = df[self.features]
+        y_raw = df[self.target]
+
+        # -----------------------------------------------------------
+        # 2. Stable LabelEncoder (same as XGB + GBHM)
+        # -----------------------------------------------------------
+        le = getattr(self, "label_encoder", None)
+
+        if le is None:
+            le = LabelEncoder()
+            le.fit(y_raw)
+            self.label_encoder = le
+        else:
+            new_labels = np.unique(y_raw)
+            if not set(new_labels).issubset(set(le.classes_)):
+                merged = np.unique(list(le.classes_) + list(new_labels))
+                le = LabelEncoder()
+                le.fit(merged)
+                self.label_encoder = le
+
+        y_encoded = le.transform(y_raw).astype(int)
+        self.hgbm_label_encoder = le
+
+        # -----------------------------------------------------------
+        # 3. Load histogram images and align
+        # -----------------------------------------------------------
+        hist_feats = None
+        if use_histograms:
+            try:
+                imgs, labels_img, auxs, le_imgs = self._load_histogram_images()
+
+                # MUST match perfectly
+                self._check_alignment(df, imgs, labels_img)
+
+                # Flatten TH2 → features
+                hist_feats = self.encode_histograms(imgs)
+
+            except Exception as e:
+                print(f"[HGBM] Histogram load failed → training tree-only: {e}")
+                hist_feats = None
+
+        # -----------------------------------------------------------
+        # 4. Build final feature matrix
+        # -----------------------------------------------------------
+        if hist_feats is not None:
+            X = np.concatenate([X_tree.to_numpy(), hist_feats], axis=1)
+            feature_names = list(X_tree.columns) + self.hist_feature_names
+        else:
+            X = X_tree.to_numpy()
+            feature_names = list(X_tree.columns)
+
+        # Save expected shape
+        self.hgbm_num_features = X.shape[1]
+        self.hgbm_feature_names = feature_names
+
+        # -----------------------------------------------------------
+        # 5. Train/test split
+        # -----------------------------------------------------------
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y_encoded, test_size=test_size, random_state=random_state
+        )
+
+        # -----------------------------------------------------------
+        # 6. Train HGBM (VERY FAST)
+        # -----------------------------------------------------------
+        print("[HGBM] Training HistGradientBoostingClassifier...")
+
+        self.hgbm_clf = HistGradientBoostingClassifier(
+            learning_rate=learning_rate,
+            max_depth=max_depth,
+            max_iter=max_iter,
+            random_state=random_state,
+            verbose=1,             # shows progress bar
+        )
+
+        self.hgbm_clf.fit(X_train, y_train)
+
+        # -----------------------------------------------------------
+        # 7. Evaluate
+        # -----------------------------------------------------------
+        pred_train = self.hgbm_clf.predict(X_train)
+        pred_test  = self.hgbm_clf.predict(X_test)
+
+        train_acc = accuracy_score(y_train, pred_train)
+        test_acc  = accuracy_score(y_test, pred_test)
+
+        print(f"[HGBM] Training Accuracy: {train_acc:.4f}")
+        print(f"[HGBM] Test Accuracy:     {test_acc:.4f}")
+
+        return self.hgbm_clf
+
+
+    def hgbm_predict(self, X):
+        """
+        Predict using HistGradientBoostingClassifier.
+        """
+
+        if not hasattr(self, "hgbm_clf") or self.hgbm_clf is None:
+            raise RuntimeError("No HGBM model loaded.")
+
+        if isinstance(X, pd.DataFrame):
+            Xnp = X.values
+        else:
+            Xnp = np.asarray(X)
+
+        Xnp = np.nan_to_num(Xnp, nan=0.0, posinf=0.0, neginf=0.0)
+
+        expected = getattr(self, "hgbm_num_features", None)
+        if expected is not None and Xnp.shape[1] != expected:
+            if Xnp.shape[1] > expected:
+                Xnp = Xnp[:, :expected]
+            else:
+                pad = np.zeros((Xnp.shape[0], expected - Xnp.shape[1]), dtype=Xnp.dtype)
+                Xnp = np.concatenate([Xnp, pad], axis=1)
+
+        preds = self.hgbm_clf.predict(Xnp).astype(int)
+        return self.label_encoder.inverse_transform(preds)
+
+
 
     # ===============================================================
     #                DDPM – BUILD / TRAIN / SAMPLE
@@ -1062,7 +1143,7 @@ class GradientBoostHybrid:
                 Xnp = Xnp[:, :expected]
             else:
                 pad = np.zeros((Xnp.shape[0], expected - Xnp.shape[1]), dtype=Xnp.dtype)
-                Xnp = np.vstack([Xnp, pad])
+                Xnp = np.concatenate([Xnp, pad], axis=1)
 
         dmat = xgb.DMatrix(Xnp)
         preds = self.xgb_model.predict(dmat).astype(int)
@@ -1348,5 +1429,6 @@ def evaluate_and_plot_all(
             y_true, probas, label_encoder=label_encoder,
             title=f"{prefix} — ROC Curves"
         )
+
 
 
