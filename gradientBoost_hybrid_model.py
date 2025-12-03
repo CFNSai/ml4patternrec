@@ -316,42 +316,60 @@ class GradientBoostHybrid:
     def _load_histogram_images(self):
         """
         Load TH2 images from ROOT files using DDPM_utils.
+
         Returns:
-            imgs          N x H x W
-            labels_imgs   N
-            auxs          N (aux scalar)
-            le_imgs       LabelEncoder (if provided)
+            imgs        : numpy array (N, H, W)
+            labels_imgs : numpy array (N,)
+            auxs        : numpy array (N,)
+            le_imgs     : LabelEncoder from DDPM_utils
         """
+
         try:
-            imgs, labels, auxs, le_imgs = DDPM_utils._load_th2_images(
-                inputfiles=self._inputfiles,
-                histogram_name=self.histogram_name,
-                tree_name=self.tree_name,
-                aux_scalar_branch=self.aux_scalar_branch,
-                target=self.target,
-                hist_shape=self.hist_shape,
-                x_edges=self.x_edges,
-                y_edges=self.y_edges
-            )
+            # Force CPU to avoid TensorFlow _EagerConst GPU bug
+            if TF_AVAILABLE:
+                with tf.device("/CPU:0"):
+                    imgs, labels, auxs, le_imgs = DDPM_utils._load_th2_images(
+                        inputfiles=self._inputfiles,
+                        histogram_name=self.histogram_name,
+                        tree_name=self.tree_name,
+                        aux_scalar_branch=self.aux_scalar_branch,
+                        target=self.target,
+                        hist_shape=self.hist_shape,
+                        x_edges=self.x_edges,
+                        y_edges=self.y_edges
+                    )
+            else:
+                imgs, labels, auxs, le_imgs = DDPM_utils._load_th2_images(
+                    inputfiles=self._inputfiles,
+                    histogram_name=self.histogram_name,
+                    tree_name=self.tree_name,
+                    aux_scalar_branch=self.aux_scalar_branch,
+                    target=self.target,
+                    hist_shape=self.hist_shape,
+                    x_edges=self.x_edges,
+                    y_edges=self.y_edges
+                )
+
         except Exception as e:
             raise RuntimeError(f"Could not load TH2 histogram images: {e}")
 
-        # Ensure numpy
+        # --- Ensure numpy format ---
         imgs = np.asarray(imgs)
         labels = np.asarray(labels)
         auxs = np.asarray(auxs)
 
-        # Sanity checks
+        # --- Sanity checks ---
         if imgs.ndim != 3:
             raise RuntimeError(f"Histogram images must be (N,H,W), got {imgs.shape}")
 
         if imgs.shape[0] != labels.shape[0]:
-            raise RuntimeError("Mismatch between number of images and labels from _load_th2_images()")
+            raise RuntimeError("Mismatch between number of images and labels")
 
         if imgs.shape[0] != auxs.shape[0]:
-            raise RuntimeError("Mismatch between images and aux scalars")
+            raise RuntimeError("Mismatch between number of images and aux scalar values")
 
         return imgs, labels, auxs, le_imgs
+
 
     # ===============================================================
     #           ALIGN TABULAR DATA ↔ HISTOGRAM IMAGES
@@ -1330,4 +1348,5 @@ def evaluate_and_plot_all(
             y_true, probas, label_encoder=label_encoder,
             title=f"{prefix} — ROC Curves"
         )
+
 
