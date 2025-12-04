@@ -34,14 +34,8 @@ except Exception:
 
 
 class GradientBoostHybrid:
-    """
-    Hybrid model combining numerical features + Cherenkov histogram images.
-    This version removes ALL information leaks:
-        - No bin_index
-        - No radius
-    """
 
-   def __init__(
+    def __init__(
         self,
         inputfile_name: Union[str, List[str]],
         tree_name: str,
@@ -332,7 +326,7 @@ class GradientBoostHybrid:
         if len(np.unique(y_df)) != len(np.unique(labels_imgs)):
             print("[WARNING] Label distribution differs between TTree and Histogram images.")
         return True
-
+        
     # ===============================================================
     #                        XGBOOST TRAINING
     # ===============================================================
@@ -748,42 +742,44 @@ class GradientBoostHybrid:
         return self.label_encoder.inverse_transform(preds)
 
 
-
     # ===============================================================
-    #                DDPM – BUILD / TRAIN / SAMPLE
+    #           DDPM TRAINING (VERY SIMPLE VERSION)
     # ===============================================================
-
-    def build_diffusion_model(self, n_classes: Optional[int] = None):
+    def train_ddpm(self, imgs, epochs=1, batch_size=128):
         """
-        Build a conditional UNet for DDPM sampling.
-
-        - Uses HybridUNetDiT_TF
-        - No leak
-        - n_classes determined from label encoder
+        Minimal DDPM training loop — simplified noise prediction.
+        imgs must be shape (N, 64, 64, 1)
         """
+        import tensorflow as tf
+        from tensorflow import keras
+        import numpy as np
 
-        if n_classes is None:
-            if self.label_encoder is not None:
-                n_classes = len(self.label_encoder.classes_)
-            else:
-                n_classes = 32  # fallback, rarely used
+        if imgs.ndim == 3:
+            imgs = imgs[..., None]
 
-        input_shape = (*self.hist_shape, 1)
+        optimizer = keras.optimizers.Adam(1e-4)
 
-        # Construct the conditional UNet (DiT-like)
-        self.diffusion_model = HybridUNetDiT_TF(
-            input_shape=input_shape,
-            base_channels=32
-        )
+        for epoch in range(epochs):
+            print(f"[DDPM] Epoch {epoch+1}/{epochs}")
 
-        # Exponential Moving Average helper
-        self.ema_helper = EMA(self.diffusion_model, decay=0.999)
+            for i in range(0, len(imgs), batch_size):
+                batch = imgs[i:i+batch_size]
 
-        # Keep track that the model exists (needs compile via training)
-        self.diffusion_compiled = False
+                # add random Gaussian noise
+                noise = np.random.randn(*batch.shape).astype("float32")
 
-        return self.diffusion_model
+                with tf.GradientTape() as tape:
+                    pred = self.ddpm_model(batch, training=True)
+                    loss = tf.reduce_mean((pred - noise)**2)
 
+                grads = tape.gradient(loss, self.ddpm_model.trainable_variables)
+                optimizer.apply_gradients(zip(grads, self.ddpm_model.trainable_variables))
+
+                # EMA update
+                for w, w_ema in zip(self.ddpm_model.weights, self.ema_model.weights):
+                    w_ema.assign(0.999 * w_ema + 0.001 * w)
+
+        print("[DDPM] Training complete.")
     # -----------------------------------------------------------
     # Forward diffusion q(x_t | x_0)
     # -----------------------------------------------------------
@@ -795,296 +791,7 @@ class GradientBoostHybrid:
         coef2 = DDPM_utils.extract(tf.sqrt(1.0 - alphas_cumprod_tf), t, tf.shape(x_start))
         return coef1 * x_start + coef2 * noise
 
-    def train_ddpm(
-        self,
-        epochs=10,
-        batch_size=8,
-        lr=2e-4,
-        beta_schedule='cosine',
-        timesteps=None,
-        use_mixed_precision=False,
-        clip_grad_norm=1.0,
-        base_ch=32,
-        embed_dim=128,
-        num_heads=4,
-        num_layers=2,
-        groups_gn=8,
-        time_emb=True,
-        class_emb=True,
-        num_classes=4,
-        self_condition=False,
-        ema_decay=0.999,
-        device=None,
-        path='plots/ddpm_training',
-        show=True
-    ):
-        print("\n====================================================")
-        print("              🌀 DDPM TRAINING START                ")
-        print("====================================================")
-        global_start = time.time()
-
-        if not TF_AVAILABLE:
-            raise RuntimeError("TensorFlow not available for DDPM training.")
-
-        # GPU CHECK
-        gpus = tf.config.list_physical_devices("GPU")
-        if gpus:
-            print(f"[INFO] GPU detected: {gpus}")
-            device = "/GPU:0"
-        else:
-            print("[WARNING] ❌ No GPU detected — training will be VERY slow.")
-            device = "/CPU:0"
-        print(f"[INFO] Using device: {device}")
-
-        # LOAD IMAGES
-        print("\n[DDPM] Loading histogram images…")
-        t0 = time.time()
-        imgs, labels_raw, auxs, le_imgs = self._load_histogram_images()
-        print(f"[DDPM] Loaded {imgs.shape[0]} images in {time.time() - t0:.2f}s")
-
-        # LABEL ENCODING
-        print("[DDPM] Encoding labels…")
-        t0 = time.time()
-        if self.label_encoder is not None:
-            le = self.label_encoder
-            incoming = np.unique(labels_raw)
-            if not set(incoming).issubset(le.classes_):
-                merged = np.unique(list(le.classes_) + list(incoming))
-                le = LabelEncoder()
-                le.fit(merged)
-                self.label_encoder = le
-        else:
-            le = LabelEncoder()
-            le.fit(labels_raw)
-            self.label_encoder = le
-
-        labels = le.transform(labels_raw).astype(np.int32)
-        print(f"[DDPM] Encoded {len(le.classes_)} classes in {time.time() - t0:.2f}s")
-
-        # DIFFUSION SCHEDULE
-        print("\n[DDPM] Preparing beta schedule…")
-        T = int(timesteps or self.ddpm_timesteps)
-        betas = DDPM_utils.make_beta_schedule(T, schedule=beta_schedule).astype(np.float32)
-        alphas = (1.0 - betas).astype(np.float32)
-        alphas_cumprod = np.cumprod(alphas).astype(np.float32)
-
-        self.betas = betas
-        self.alphas = alphas
-        self.alphas_cumprod = alphas_cumprod
-        self.alphas_cumprod_prev = np.append(1.0, alphas_cumprod[:-1])
-
-        print(f"[DDPM] Schedule ready: {T} timesteps")
-
-        # NORMALIZATION
-        print("[DDPM] Normalizing images…")
-        X = imgs.astype(np.float32)
-        X = (X - 0.5) * 2.0
-        X = X[..., None]
-        auxs = auxs.astype(np.float32)
-        print(f"[DDPM] Final dataset shape: {X.shape}")
-
-        # DATASET PIPELINE
-        print("\n[DDPM] Building dataset pipeline…")
-        t0 = time.time()
-        ds = tf.data.Dataset.from_tensor_slices((X, labels, auxs))
-        ds = ds.shuffle(4096).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-        print(f"[DDPM] Pipeline ready in {time.time() - t0:.2f}s")
-
-        # ======================================================
-        # BUILD MODEL (CORRECTED — ONLY ONE BLOCK)
-        # ======================================================
-        if self.diffusion_model is None or not self.diffusion_compiled:
-            print("\n[DDPM] Building diffusion model…")
-            t0 = time.time()
-
-            self.diffusion_model = HybridUNetDiT_TF(
-                input_shape=(*self.hist_shape, 1),
-                base_ch=base_ch,
-                embed_dim=embed_dim,
-                num_heads=num_heads,
-                num_layers=num_layers,
-                time_emb=time_emb,
-                class_emb=class_emb,
-                aux_emb_dim=32,
-                ema_decay=ema_decay,
-                num_classes=len(le.classes_),
-                self_condition=self_condition,
-            )
-
-            print(f"[DDPM] Model built in {time.time() - t0:.2f}s")
-
-            # -----------------------------------------------------
-            # FORCE MODEL BUILD: dummy forward pass
-            # -----------------------------------------------------
-            print("[DDPM] Building model weights with dummy pass...")
-
-            dummy_x = tf.zeros((1, self.hist_shape[0], self.hist_shape[1], 1), dtype=tf.float32)
-            dummy_t = tf.zeros((1,), dtype=tf.int32)
-            dummy_y = tf.zeros((1,), dtype=tf.int32)
-
-            if auxs.ndim == 1:
-                dummy_aux = tf.zeros((1,), dtype=tf.float32)
-            else:
-                dummy_aux = tf.zeros((1, auxs.shape[1]), dtype=tf.float32)
-
-            _ = self.diffusion_model(dummy_x, dummy_t, dummy_y, dummy_aux, training=False)
-
-            print("[DDPM] Model successfully built.\n")
-
-            try:
-                print("\n[DDPM] Model summary:")
-                self.diffusion_model.summary()
-            except Exception:
-                print("[DDPM] (Model summary unavailable)")
-
-            print("[DDPM] Initializing EMA…")
-            self.ema_helper = EMA(self.diffusion_model, decay=ema_decay)
-            self.ema_model = self.ema_helper.ema_model
-
-        # ======================================================
-        # OPTIMIZER
-        # ======================================================
-        optimizer = keras.optimizers.Adam(lr)
-        mse = tf.keras.losses.MeanSquaredError()
-
-        if use_mixed_precision:
-            policy = tf.keras.mixed_precision.Policy("mixed_float16")
-            tf.keras.mixed_precision.set_global_policy(policy)
-            optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
-            print("[DDPM] Mixed precision enabled.")
-
-        alphas_cumprod_tf = tf.constant(alphas_cumprod, dtype=tf.float32)
-
-        # ======================================================
-        # TRAINING LOOP
-        # ======================================================
-        print("\n====================================================")
-        print(" ⚠️ First batch will be VERY SLOW (TF graph tracing)")
-        print("====================================================")
-
-        train_losses = []
-
-        for epoch in range(epochs):
-            print(f"\n[DDPM] ===== EPOCH {epoch+1}/{epochs} =====")
-            t0 = time.time()
-            epoch_loss = 0.0
-            steps = 0
-
-            for x_batch, y_batch, aux_batch in ds:
-
-                B = tf.shape(x_batch)[0]
-                t_rand = tf.random.uniform((B,), minval=0, maxval=T, dtype=tf.int32)
-
-                noise = tf.random.normal(tf.shape(x_batch))
-                x_noisy = self.q_sample(x_batch, t_rand, noise, alphas_cumprod_tf)
-
-                with tf.GradientTape() as tape:
-                    pred_noise = self.diffusion_model(
-                        x_noisy, t_rand, y_batch, aux_batch, training=True
-                    )
-                    pred_noise = tf.cast(pred_noise, tf.float32)
-                    loss = mse(noise, pred_noise)
-
-                grads = tape.gradient(loss, self.diffusion_model.trainable_variables)
-
-                if clip_grad_norm:
-                    grads, _ = tf.clip_by_global_norm(grads, clip_grad_norm)
-
-                optimizer.apply_gradients(
-                    zip(grads, self.diffusion_model.trainable_variables)
-                )
-
-                epoch_loss += float(loss)
-                steps += 1
-
-            epoch_loss /= max(1, steps)
-            train_losses.append(epoch_loss)
-
-            print(
-                f"[DDPM] Epoch {epoch+1}/{epochs} "
-                f"| loss={epoch_loss:.6f} "
-                f"| time={time.time() - t0:.1f}s"
-            )
-
-            # EMA UPDATE
-            if self.ema_model is not None:
-                ema_w = self.ema_model.get_weights()
-                cur_w = self.diffusion_model.get_weights()
-                new_w = [
-                    ema_decay * w_ema + (1 - ema_decay) * w_mod
-                    for w_ema, w_mod in zip(ema_w, cur_w)
-                ]
-                self.ema_model.set_weights(new_w)
-
-        self.diffusion_compiled = True
-
-        print("\n[DDPM] Training complete.")
-        print(f"Total training time: {time.time() - global_start:.1f}s")
-
-        self.ddpm_train_history = {
-            "loss": train_losses,
-            "betas": betas
-        }
-
-        if show:
-            DDPM_utils.plot_loss_curve(train_losses, save_dir=path, show=True)
-            DDPM_utils.plot_beta_schedule(betas, save_dir=path)
-
-
-    # ===============================================================
-    #                DDPM SAMPLING (IMAGE GENERATION)
-    # ===============================================================
-    def sample_ddpm(self, n_samples=9, use_ema=True):
-        """
-        Generate new Cherenkov-ring images from the trained DDPM.
-        Returns an array (n_samples, H, W, 1).
-        """
-
-        if not self.diffusion_compiled:
-            raise RuntimeError("DDPM model is not trained. Run train_ddpm() first.")
-
-        print(f"[DDPM] Sampling {n_samples} images...")
-
-        model = self.ema_model if use_ema and hasattr(self, "ema_model") else self.diffusion_model
-
-        T = len(self.betas)
-        betas = tf.constant(self.betas, dtype=tf.float32)
-        alphas = 1.0 - betas
-        alphas_cumprod = tf.math.cumprod(alphas)
-
-        # Start from pure Gaussian noise
-        x = tf.random.normal((n_samples, self.hist_shape[0], self.hist_shape[1], 1))
-
-        for t in reversed(range(T)):
-            t_tensor = tf.fill([n_samples], t)
-
-            # unconditional → class=0, aux=0
-            y_dummy = tf.zeros((n_samples,), dtype=tf.int32)
-            aux_dummy = tf.zeros((n_samples,), dtype=tf.float32)
-
-            # predict the noise
-            noise_pred = model(x, t_tensor, y_dummy, aux_dummy, training=False)
-
-            alpha_t = alphas[t]
-            alpha_cum = alphas_cumprod[t]
-            beta_t = betas[t]
-
-            # equation (DDPM) posterior mean
-            x = (1 / tf.sqrt(alpha_t)) * (x - (beta_t / tf.sqrt(1 - alpha_cum)) * noise_pred)
-
-            if t > 0:
-                # add stochastic term
-                noise = tf.random.normal(tf.shape(x))
-                x = x + tf.sqrt(beta_t) * noise
-
-        # bring back to [0,1]
-        x = tf.clip_by_value(x, -1, 1)
-        x = (x + 1) / 2.0
-
-        print("[DDPM] Sampling finished.")
-        return x.numpy()
-
-
+  
     # ===============================================================
     #                        PREDICTION HELPERS
     # ===============================================================
@@ -1120,118 +827,312 @@ class GradientBoostHybrid:
                 return np.concatenate([hist_array, pad], axis=1)
 
         return hist_array
+        
+    # ===============================================================
+    #      CNN ENCODER (PATTERN RECOGNITION SUR LES IMAGES TH2)
+    # ===============================================================
+    def _build_cnn_encoder(self, latent_dim=64):
+        """
+        Petit CNN pour encoder les images TH2 → vecteur latent.
+        """
+        if not TF_AVAILABLE:
+            raise RuntimeError("TensorFlow requis pour CNN.")
+
+        H, W = self.hist_shape
+        inp = layers.Input(shape=(H, W, 1))
+
+        x = layers.Conv2D(32, 3, activation="relu", padding="same")(inp)
+        x = layers.MaxPooling2D()(x)
+        x = layers.Conv2D(64, 3, activation="relu", padding="same")(x)
+        x = layers.MaxPooling2D()(x)
+        x = layers.Conv2D(128, 3, activation="relu", padding="same")(x)
+        x = layers.GlobalAveragePooling2D()(x)
+
+        latent = layers.Dense(latent_dim, activation="linear")(x)
+
+        self.cnn_encoder = keras.Model(inputs=inp, outputs=latent)
+        print(f"[Hybrid] CNN encoder built, latent_dim={latent_dim}")
+        return self.cnn_encoder
 
     # ===============================================================
-    #                 XGB PREDICT
+    #                OPTIONAL DENOISING VIA DDPM (EMA)
     # ===============================================================
-    def xgb_predict(self, X):
+    def _denoise_images(self, imgs, batch_size=1000):
         """
-        Predict using trained XGBoost classifier.
-        X may be a DataFrame or a numpy array.
+        DDPM denoising en mini-batches pour éviter un OOM GPU.
+        imgs : (N, 64, 64)
         """
+        import tensorflow as tf
+        import numpy as np
 
-        if self.xgb_model is None:
-            raise RuntimeError("No XGBoost model loaded.")
+        N = imgs.shape[0]
 
-        # Convert DF → array
-        if isinstance(X, pd.DataFrame):
-            Xnp = X.values
-        else:
-            Xnp = np.asarray(X)
+        if not hasattr(self, "ema_model") or self.ema_model is None:
+            print("[DDPM] No EMA model → no denoising applied.")
+            return imgs
 
-        # sanitize
-        Xnp = np.nan_to_num(Xnp, nan=0.0, posinf=0.0, neginf=0.0)
+        print(f"[DDPM] Denoising {N} images in batches of {batch_size}...")
 
-        # shape correction
-        expected = getattr(self, "xgb_num_features", None)
-        if expected is not None and Xnp.shape[1] != expected:
-            if Xnp.shape[1] > expected:
-                Xnp = Xnp[:, :expected]
-            else:
-                pad = np.zeros((Xnp.shape[0], expected - Xnp.shape[1]), dtype=Xnp.dtype)
-                Xnp = np.concatenate([Xnp, pad], axis=1)
+        # Préparation des constantes DDPM
+        betas = tf.constant(self.betas, dtype=tf.float32)
+        alphas = 1.0 - betas
+        alphas_cumprod = tf.math.cumprod(alphas)
+        T = len(betas)
 
-        dmat = xgb.DMatrix(Xnp)
-        preds = self.xgb_model.predict(dmat).astype(int)
+        out_list = []
 
-        # decode
-        return self.label_encoder.inverse_transform(preds)
+        # Traitement batch par batch
+        for i in range(0, N, batch_size):
+            batch = imgs[i:i + batch_size][..., None].astype("float32")
+            x = tf.convert_to_tensor((batch - 0.5) * 2.0)
 
-    # ===============================================================
-    #                 GBHM PREDICT
-    # ===============================================================
-    def gbhm_predict(self, X):
-        """
-        Predict using Gradient Boosting classifier.
-        """
+            # Light denoising : derniers 20% des steps DDPM
+            for t in reversed(range(int(T * 0.8), T)):
+                t_tensor = tf.fill([x.shape[0]], t)
+                eps = self.ema_model(x, training=False)
 
-        if self.gbhm_clf is None:
-            raise RuntimeError("No GBHM model loaded.")
+                alpha_t = alphas[t]
+                alpha_cum = alphas_cumprod[t]
+                beta_t = betas[t]
 
-        if isinstance(X, pd.DataFrame):
-            Xnp = X.values
-        else:
-            Xnp = np.asarray(X)
+                x = (1.0 / tf.sqrt(alpha_t)) * (
+                    x - (beta_t / tf.sqrt(1.0 - alpha_cum)) * eps
+                )
 
-        Xnp = np.nan_to_num(Xnp, nan=0.0, posinf=0.0, neginf=0.0)
+            # Retour dans [0,1]
+            x = (x + 1.0) / 2.0
+            x = tf.squeeze(tf.clip_by_value(x, 0.0, 1.0), axis=-1).numpy()
 
-        expected = getattr(self, "gbhm_num_features", None)
-        if expected is not None and Xnp.shape[1] != expected:
-            if Xnp.shape[1] > expected:
-                Xnp = Xnp[:, :expected]
-            else:
-                pad = np.zeros((Xnp.shape[0], expected - Xnp.shape[1]), dtype=Xnp.dtype)
-                Xnp = np.concatenate([Xnp, pad], axis=1)
+            out_list.append(x)
 
-        preds = self.gbhm_clf.predict(Xnp).astype(int)
-        return self.label_encoder.inverse_transform(preds)
+            print(f"[DDPM] Denoised batch {i} → {i + len(batch)}")
+
+        return np.concatenate(out_list, axis=0)
 
     # ===============================================================
-    #        ROOT TH2 → direct prediction via XGB
+    #      HYBRID PR-CNN + XGBOOST (FAST VERSION — df/imgs PROVIDED)
     # ===============================================================
-    def predict_from_hist(self, hist2d):
+    def xgb_prcnn_train(
+        self,
+        df,
+        imgs,
+        test_size=0.25,
+        latent_dim=64,
+        use_denoising=False,
+        num_boost_round=300,
+        max_depth=6,
+        eta=0.1,
+        subsample=0.8
+    ):
+        print("\n================ HYBRID PR-CNN-XGB TRAINING =================")
+
+        # 1) tabular features
+        X_tree = df[self.features].to_numpy()
+        y_raw  = df[self.target].to_numpy()
+
+        # LabelEncoder
+        if self.label_encoder is None:
+            self.label_encoder = LabelEncoder().fit(y_raw)
+        y = self.label_encoder.transform(y_raw).astype(int)
+
+        # 2) optional denoising
+        if use_denoising and hasattr(self, "ema_model"):
+            imgs = self._denoise_images(imgs)
+
+        # 3) build CNN encoder
+        print("[PR-CNN] Building CNN encoder...")
+        cnn = self._build_cnn_encoder(latent_dim)
+        imgs_tf = imgs[..., None].astype(np.float32)
+
+        print("[PR-CNN] Extracting latent vectors...")
+        Z_img = cnn.predict(imgs_tf, batch_size=256, verbose=1)
+
+        # 4) final features
+        X_full = np.concatenate([X_tree, Z_img], axis=1)
+
+        # 5) train/test split
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_full, y, test_size=test_size, random_state=42
+        )
+
+        # 6) XGBoost
+        print("[PR-CNN] Training XGBoost...")
+        dtrain = xgb.DMatrix(X_train, label=y_train)
+        dtest  = xgb.DMatrix(X_test,  label=y_test)
+
+        params = {
+            'objective': 'multi:softmax',
+            'num_class': len(self.label_encoder.classes_),
+            'max_depth': max_depth,
+            'eta': eta,
+            'subsample': subsample,
+            'tree_method': 'hist'
+        }
+
+        self.prcnn_model = xgb.train(
+            params,
+            dtrain,
+            num_boost_round=num_boost_round,
+            evals=[(dtest, "test")],
+            verbose_eval=True
+        )
+
+        preds = self.prcnn_model.predict(dtest).astype(int)
+        acc = accuracy_score(y_test, preds)
+
+        print(f"[PR-CNN] Final accuracy = {acc:.4f}")
+
+        self.cnn_encoder = cnn
+        return self.prcnn_model, acc
+
+
+    # ===============================================================
+    #                 HYBRID PR-CNN + XGB — PREDICT
+    # ===============================================================
+    def xgb_prcnn_predict(self, df, imgs, use_denoising=False):
+
+        if not hasattr(self, "prcnn_model"):
+            raise RuntimeError("PR-CNN-XGB model not trained.")
+
+        if use_denoising and hasattr(self, "ema_model"):
+            imgs = self._denoise_images(imgs)
+
+        # tree features
+        X_tree = df[self.features].to_numpy()
+
+        # CNN embedding
+        imgs_tf = imgs[..., None].astype(np.float32)
+        Z_img = self.cnn_encoder.predict(imgs_tf, batch_size=256, verbose=0)
+
+        X_full = np.concatenate([X_tree, Z_img], axis=1)
+        preds_int = self.prcnn_model.predict(xgb.DMatrix(X_full)).astype(int)
+
+        return self.label_encoder.inverse_transform(preds_int)
+        
+    # ===============================================================
+    #                 DDPM — BUILD MODEL + EMA
+    # ===============================================================
+    def build_diffusion_model(self, img_shape=(64,64,1), num_timesteps=400):
         """
-        Predict class labels from a ROOT TH2F histogram object.
-        Steps:
-         - convert histogram bins to (posX,posY,count)
-         - build a DataFrame
-         - apply XGB model
+        Build a minimal UNet-like DDPM model + EMA model.
+        Compatible with train_ddpm() and _denoise_images().
         """
+        import tensorflow as tf
+        from tensorflow import keras
+        from tensorflow.keras import layers
 
-        if self.xgb_model is None:
-            raise RuntimeError("xgb_model is not trained.")
+        self.img_shape = img_shape
+        self.num_timesteps = num_timesteps
 
-        # Extract bins
-        x_bins = hist2d.GetXaxis().GetNbins()
-        y_bins = hist2d.GetYaxis().GetNbins()
-        data = []
+        # ----- Simple UNet -----
+        inputs = keras.Input(shape=img_shape)
 
-        for ix in range(1, x_bins + 1):
-            x_center = hist2d.GetXaxis().GetBinCenter(ix)
-            for iy in range(1, y_bins + 1):
-                count = hist2d.GetBinContent(ix, iy)
-                if count <= 0:
-                    continue
-                y_center = hist2d.GetYaxis().GetBinCenter(iy)
-                data.append((x_center, y_center, count))
+        x = layers.Conv2D(32, 3, padding="same", activation="relu")(inputs)
+        x = layers.MaxPooling2D()(x)
+        x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
+        x = layers.MaxPooling2D()(x)
+        x = layers.Conv2D(128, 3, padding="same", activation="relu")(x)
 
-        if not data:
-            print("Warning: empty histogram.")
-            return None
+        x = layers.UpSampling2D()(x)
+        x = layers.Conv2D(64, 3, padding="same", activation="relu")(x)
+        x = layers.UpSampling2D()(x)
 
-        df = pd.DataFrame(data, columns=['posX', 'posY', 'weight'])
+        outputs = layers.Conv2D(1, 3, padding="same")(x)
 
-        # Filter features
-        feature_cols = [f for f in ['posX', 'posY'] if f in self.features]
-        X = df[feature_cols]
+        # Store DDPM model
+        self.ddpm_model = keras.Model(inputs, outputs, name="DDPM_UNet")
 
-        dmat = xgb.DMatrix(X, weight=df["weight"].values)
-        preds = self.xgb_model.predict(dmat).astype(int)
+        # ----- EMA COPY -----
+        self.ema_model = keras.models.clone_model(self.ddpm_model)
+        self.ema_model.set_weights(self.ddpm_model.get_weights())
 
-        labels = self.label_encoder.inverse_transform(preds)
-        df["prediction"] = labels
+        print("[DDPM] Diffusion model + EMA created.")
+        return self.ddpm_model, self.ema_model
 
-        return df
+     # ===============================================================
+    #                 DDPM — TRAIN (NO CONDITIONAL INPUT)
+    # ===============================================================
+    def train_ddpm(self, imgs, epochs=1, batch_size=128):
+        """
+        Train DDPM model for denoising. Extremely simplified.
+        imgs must be (N,64,64) or (N,64,64,1)
+        """
+        import tensorflow as tf
+        from tensorflow import keras
+        import numpy as np
+        import time
+
+        # Ensure shape (N,64,64,1)
+        if imgs.ndim == 3:
+            imgs = imgs[..., None]
+
+        optimizer = keras.optimizers.Adam(1e-4)
+        N = len(imgs)
+
+        for ep in range(epochs):
+            print(f"[DDPM] Epoch {ep+1}/{epochs}")
+            t0 = time.time()
+
+            # Shuffle indices for robustness
+            idx = np.random.permutation(N)
+
+            for j, i in enumerate(range(0, N, batch_size)):
+                batch_idx = idx[i : i + batch_size]
+                batch = imgs[batch_idx]
+
+                noise = np.random.randn(*batch.shape).astype("float32")
+
+                with tf.GradientTape() as tape:
+                    pred = self.ddpm_model(batch, training=True)
+                    loss = tf.reduce_mean((pred - noise)**2)
+
+                grads = tape.gradient(loss, self.ddpm_model.trainable_variables)
+                optimizer.apply_gradients(zip(grads, self.ddpm_model.trainable_variables))
+
+                # ----- EMA update -----
+                for w, w_ema in zip(self.ddpm_model.weights, self.ema_model.weights):
+                    w_ema.assign(0.999 * w_ema + 0.001 * w)
+
+                # ----- Progress print -----
+                if j % 20 == 0:
+                    print(f"[DDPM] Step {i:6d}/{N} — Loss={float(loss):.5f}")
+
+            print(f"[DDPM] Epoch {ep+1} finished in {time.time()-t0:.1f}s")
+
+        print("[DDPM] Training complete.")
+
+    # ===============================================================
+    #            DDPM — SAVE + LOAD + ENSURE SCHEDULE
+    # ===============================================================
+    def save_ddpm(self, path=None):
+        if path is None:
+            path = f"{self.model_dir}/ddpm_ema.h5"
+        self.ema_model.save(path)
+        print(f"[DDPM] EMA saved at {path}")
+
+    def load_ddpm(self, path=None):
+        from tensorflow import keras
+        import os
+
+        if path is None:
+            path = f"{self.model_dir}/ddpm_ema.h5"
+
+        if not os.path.exists(path):
+            print("[DDPM] No saved EMA model found.")
+            return False
+
+        print(f"[DDPM] Loading EMA from {path}")
+        self.ema_model = keras.models.load_model(path, compile=False)
+        self.ensure_ddpm_schedule()
+        return True
+
+    def ensure_ddpm_schedule(self):
+        self.betas = DDPM_utils.make_beta_schedule(self.ddpm_timesteps)
+        self.alphas = 1.0 - self.betas
+        self.alphas_cumprod = np.cumprod(self.alphas).astype(np.float32)
+        self.alphas_cumprod_prev = np.append(1.0, self.alphas_cumprod[:-1]).astype(np.float32)
+
+
 
 # ======================================================================
 #           JOINT PERFORMANCE SUMMARY AND ANALYSIS UTILITIES
@@ -1435,6 +1336,13 @@ def evaluate_and_plot_all(
             y_true, probas, label_encoder=label_encoder,
             title=f"{prefix} — ROC Curves"
         )
+
+
+
+
+
+
+
 
 
 
